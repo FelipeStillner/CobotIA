@@ -339,22 +339,24 @@ class RealSense:
             self.lib.rs2_delete_context(self.ctx)
 
 
-def depth_to_colormap(depth_u16: np.ndarray) -> np.ndarray:
+# Depth colors: 0 cm is one end of the scale, 100 cm is the other.
+DEPTH_COLOR_MAX_M = 1.0
+
+
+def depth_to_colormap(depth_u16: np.ndarray, depth_scale_m: float) -> np.ndarray:
     valid = depth_u16 > 0
-    vis = np.zeros(depth_u16.shape, dtype=np.uint8)
-    if np.any(valid):
-        vals = depth_u16[valid].astype(np.float32)
-        lo, hi = np.percentile(vals, [5, 95])
-        if hi <= lo:
-            hi = lo + 1.0
-        norm = np.zeros_like(depth_u16, dtype=np.float32)
-        norm[valid] = np.clip((depth_u16[valid] - lo) / (hi - lo), 0, 1)
-        vis = (norm * 255).astype(np.uint8)
-    return cv2.applyColorMap(vis, cv2.COLORMAP_TURBO)
+    depth_m = depth_u16.astype(np.float32) * float(depth_scale_m)
+    norm = np.clip(depth_m / DEPTH_COLOR_MAX_M, 0, 1)
+    vis = (norm * 255).astype(np.uint8)
+    heat = cv2.applyColorMap(vis, cv2.COLORMAP_TURBO)
+    heat[~valid] = 0
+    return heat
 
 
-def blend_overlay(color: np.ndarray, depth_u16: np.ndarray, alpha: float) -> np.ndarray:
-    heat = depth_to_colormap(depth_u16)
+def blend_overlay(
+    color: np.ndarray, depth_u16: np.ndarray, alpha: float, depth_scale_m: float = 0.001
+) -> tuple[np.ndarray, np.ndarray]:
+    heat = depth_to_colormap(depth_u16, depth_scale_m)
     valid = depth_u16 > 0
     out = color.copy()
     if np.any(valid):
@@ -383,7 +385,8 @@ def main() -> int:
     try:
         while True:
             color, depth, center_z = cam.wait_aligned()
-            overlay, heat = blend_overlay(color, depth, alpha)
+            scale = cam.depth_scale_m if cam.depth_scale_m else 0.001
+            overlay, heat = blend_overlay(color, depth, alpha, scale)
 
             cv2.drawMarker(
                 overlay,

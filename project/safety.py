@@ -1,7 +1,8 @@
 """Workspace gate and the 30 cm hover floor.
 
 An object is usable only when its camera-frame (X, Z) lies on the
-40 cm × 70 cm pad in front of the camera. The pose sent to the robot
+40 cm × 70 cm pad. The camera sits at the center of the 40 cm side.
+The pose sent to the robot
 uses that object's XY mapped into the base frame, and Z fixed on the
 hover plane. Any pose below the plane is rejected.
 """
@@ -10,15 +11,12 @@ from __future__ import annotations
 
 import numpy as np
 
+from calibration import xz_inside
 from config import (
     CAM_XZ_TO_ROBOT_R,
     CAM_XZ_TO_ROBOT_T,
     HOVER_ABOVE_TABLE_M,
     TABLE_Z_ROBOT,
-    WORK_DEPTH_Z,
-    WORK_WIDTH_X,
-    WORK_X0,
-    WORK_Z0,
 )
 
 
@@ -27,11 +25,8 @@ def hover_z() -> float:
 
 
 def in_camera_workspace(cam_x: float, cam_z: float) -> bool:
-    """True when the point is on the 40×70 cm pad in front of the camera."""
-    return (
-        WORK_X0 <= cam_x <= WORK_X0 + WORK_WIDTH_X
-        and WORK_Z0 <= cam_z <= WORK_Z0 + WORK_DEPTH_Z
-    )
+    """True when the point is on the pad (calibrated corners, or the default box)."""
+    return bool(np.asarray(xz_inside(cam_x, cam_z)).reshape(-1)[0])
 
 
 def camera_xz_to_robot_xy(cam_x: float, cam_z: float) -> tuple[float, float]:

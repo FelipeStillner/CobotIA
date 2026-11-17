@@ -1,7 +1,9 @@
 """Desk workspace and camera→robot mapping.
 
-Camera sits in one corner and looks across the desk.
-The allowed pad is 40 cm to the camera's right (X) and 70 cm forward (Z).
+Place the camera at the center of the short side of the pad (40 cm)
+and aim it along the long side (70 cm). The lens axis is the middle
+of that short edge, so the pad extends 20 cm to the left and 20 cm
+to the right.
 
 RealSense camera frame (meters):
     X right, Y down, Z forward (away from the lens).
@@ -15,10 +17,11 @@ from __future__ import annotations
 import numpy as np
 
 # Rectangle in front of the camera, in the camera frame (meters).
-WORK_X0 = 0.00          # left edge: the corner the camera sits on
-WORK_Z0 = 0.20          # near edge: 20 cm in front of the lens (measure and edit)
-WORK_WIDTH_X = 0.40     # 40 cm
-WORK_DEPTH_Z = 0.70     # 70 cm
+# Short side is 40 cm, centered on the lens. Long side is 70 cm forward.
+WORK_WIDTH_X = 0.40     # 40 cm, the short side
+WORK_DEPTH_Z = 0.70     # 70 cm, the long side
+WORK_X0 = -WORK_WIDTH_X / 2   # 20 cm to the left of the lens
+WORK_Z0 = 0.20          # near edge: 20 cm in front of the lens
 
 # Safety plane. TCP Z is always TABLE_Z_ROBOT + this, never lower.
 HOVER_ABOVE_TABLE_M = 0.30
