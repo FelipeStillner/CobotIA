@@ -1,10 +1,7 @@
-"""Workspace gate and the 30 cm hover floor.
+"""Pad check and the pose the robot will be sent.
 
-An object is usable only when its camera-frame (X, Z) lies on the
-40 cm × 70 cm pad. The camera sits at the center of the 40 cm side.
-The pose sent to the robot
-uses that object's XY mapped into the base frame, and Z fixed on the
-hover plane. Any pose below the plane is rejected.
+enforce_hover and limit_step are for the robot link. The camera loop
+does not call them yet.
 """
 
 from __future__ import annotations
@@ -25,7 +22,7 @@ def hover_z() -> float:
 
 
 def in_camera_workspace(cam_x: float, cam_z: float) -> bool:
-    """True when the point is on the pad (calibrated corners, or the default box)."""
+    """True when the point is inside the calibrated pad."""
     return bool(np.asarray(xz_inside(cam_x, cam_z)).reshape(-1)[0])
 
 

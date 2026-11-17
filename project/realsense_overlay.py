@@ -1,15 +1,6 @@
-"""Live RealSense window: color image with depth heatmap overlay.
+"""RealSense color and depth capture used by the camera loop.
 
-Uses Homebrew librealsense (C API via ctypes) — not the crashing
-pyrealsense2-macosx wheel.
-
-Usage (macOS needs sudo for USB):
-    sudo ./venv/bin/python project/realsense_overlay.py
-
-Keys:
-    q     quit
-    s     save snapshot to project/captures/
-    [ ]   decrease / increase overlay strength
+Uses Homebrew librealsense (C API via ctypes).
 """
 
 from __future__ import annotations
@@ -26,9 +17,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
-HERE = Path(__file__).resolve().parent
-OUT_DIR = HERE / "captures"
 
 RS2_API_VERSION = 2 * 10000 + 59 * 100 + 2  # 2.59.2
 RS2_STREAM_DEPTH = 1
@@ -389,75 +377,3 @@ def blend_overlay(
         mixed = cv2.addWeighted(color, 1.0 - alpha, heat, alpha, 0)
         out[valid] = mixed[valid]
     return out, heat
-
-
-def main() -> int:
-    alpha = 0.45
-    cam = RealSense()
-    print("Starting RealSense (color + depth overlay)…")
-    print("If this fails with USB/depth access, re-run with sudo.")
-    try:
-        cam.start()
-    except RsError as exc:
-        print(f"Failed to start camera: {exc}")
-        print("On macOS run:")
-        print("  sudo ./venv/bin/python project/realsense_overlay.py")
-        return 1
-
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    win = "RealSense — overlay | depth"
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-
-    try:
-        while True:
-            color, depth, center_z = cam.wait_aligned()
-            scale = cam.depth_scale_m if cam.depth_scale_m else 0.001
-            overlay, heat = blend_overlay(color, depth, alpha, scale)
-
-            cv2.drawMarker(
-                overlay,
-                (overlay.shape[1] // 2, overlay.shape[0] // 2),
-                (0, 255, 0),
-                cv2.MARKER_CROSS,
-                18,
-                2,
-            )
-            cv2.putText(
-                overlay,
-                f"center: {center_z:.3f} m   overlay: {alpha:.2f}  ([ ] adjust, s save, q quit)",
-                (10, 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (0, 255, 0),
-                2,
-                cv2.LINE_AA,
-            )
-
-            # overlay | depth side-by-side
-            view = np.hstack([overlay, heat])
-            cv2.imshow(win, view)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
-            if key == ord("["):
-                alpha = max(0.0, alpha - 0.05)
-            if key == ord("]"):
-                alpha = min(1.0, alpha + 0.05)
-            if key == ord("s"):
-                n = len(list(OUT_DIR.glob("overlay_*.png")))
-                path = OUT_DIR / f"overlay_{n:03d}.png"
-                cv2.imwrite(str(path), view)
-                print(f"Saved {path}")
-    except RsError as exc:
-        print(f"Stream error: {exc}")
-        return 1
-    finally:
-        cam.stop()
-        cv2.destroyAllWindows()
-
-    print("Done.")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

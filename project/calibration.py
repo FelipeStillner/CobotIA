@@ -1,7 +1,4 @@
-"""Saved pad corners and object color.
-
-Written by calibrate.py. Missing file means the fixed 40×70 cm box in config.py.
-"""
+"""Saved pad corners and object color, written by calibrate.py."""
 
 from __future__ import annotations
 
@@ -9,8 +6,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-
-from config import WORK_DEPTH_Z, WORK_WIDTH_X, WORK_X0, WORK_Z0
 
 PATH = Path(__file__).resolve().parent / "calibration.json"
 
@@ -54,18 +49,13 @@ def points_in_polygon(x, z, corners) -> np.ndarray:
 
 
 def xz_inside(x, z) -> np.ndarray:
-    """True where (x, z) is on the pad. Uses the calibrated corners when present."""
-    calib = load_calibration()
-    if calib and calib.get("corners_xz"):
-        return points_in_polygon(x, z, calib["corners_xz"])
+    """True where (x, z) is inside the calibrated pad corners."""
     x = np.asarray(x, dtype=float)
     z = np.asarray(z, dtype=float)
-    return (
-        (x >= WORK_X0)
-        & (x <= WORK_X0 + WORK_WIDTH_X)
-        & (z >= WORK_Z0)
-        & (z <= WORK_Z0 + WORK_DEPTH_Z)
-    )
+    calib = load_calibration()
+    if not calib or not calib.get("corners_xz"):
+        return np.zeros(np.broadcast(x, z).shape, dtype=bool)
+    return points_in_polygon(x, z, calib["corners_xz"])
 
 
 def circular_mean_hue(hues) -> float:

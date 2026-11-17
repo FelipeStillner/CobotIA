@@ -1,9 +1,4 @@
-"""Find the object on the desk.
-
-With calibration.json, the object is the largest region of the sampled
-color that lies inside the clicked pad. Without it, the object is the
-largest region closer than the table.
-"""
+"""Find the calibrated object inside the clicked pad."""
 
 from __future__ import annotations
 
@@ -13,7 +8,7 @@ import cv2
 import numpy as np
 
 from calibration import load_calibration, xz_inside
-from config import CLOSER_THAN_M, MIN_OBJECT_AREA_PX
+from config import MIN_OBJECT_AREA_PX
 
 
 @dataclass
@@ -66,13 +61,11 @@ def detect_object(
     if int(valid.sum()) < 200:
         return None
 
-    on_pad = workspace_mask(depth_u16, depth_scale_m, intrinsics)
     calib = load_calibration()
-    if calib and color_bgr is not None and "hue_center" in calib:
-        foreground = valid & on_pad & color_mask(color_bgr, calib)
-    else:
-        background = float(np.percentile(depth_m[valid], 70))
-        foreground = valid & on_pad & (depth_m < background - CLOSER_THAN_M)
+    if not calib or color_bgr is None or "hue_center" not in calib:
+        return None
+    on_pad = workspace_mask(depth_u16, depth_scale_m, intrinsics)
+    foreground = valid & on_pad & color_mask(color_bgr, calib)
     mask = (foreground.astype(np.uint8)) * 255
     kernel = np.ones((5, 5), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)

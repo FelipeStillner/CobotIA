@@ -31,7 +31,7 @@ from safety import hover_z, in_camera_workspace, target_over_object
 
 
 def paint_workspace(image, depth_u16, depth_scale_m, intrinsics):
-    """Tint the table pixels that lie inside the 40×70 cm pad."""
+    """Tint the table pixels that lie inside the calibrated pad."""
     if intrinsics is None or not depth_scale_m:
         return image
     us = np.arange(depth_u16.shape[1], dtype=np.float32)[None, :]
@@ -67,7 +67,7 @@ def draw_status(overlay, det, target) -> None:
                 f"would send  X={target[0]:.3f} Y={target[1]:.3f} Z={target[2]:.3f} m"
             )
         else:
-            lines.append("would send  nothing (outside 40x70 cm pad)")
+            lines.append("would send  nothing (outside the pad)")
     else:
         lines = ["no object", "would send  nothing"]
     lines.append("camera only — robot not connected")
