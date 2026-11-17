@@ -1,7 +1,6 @@
-"""Pad check and the pose the robot will be sent.
+"""Pad check and the pose sent to the robot.
 
-enforce_hover and limit_step are for the robot link. The camera loop
-does not call them yet.
+Z is locked to the plane measured on the four corners.
 """
 
 from __future__ import annotations

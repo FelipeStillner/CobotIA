@@ -1,9 +1,8 @@
-"""Camera frame and the robot command that the next step will send.
+"""Robot command settings.
 
-The pad on the table comes from calibration.json (the four clicked corners).
-RealSense camera frame (meters): X right, Y down, Z forward.
-
-The TCP stays on a plane 30 cm above the table, directly over the object.
+The pad and the camera-to-base map come from the four taught corners.
+TCP Z stays on the plane measured on the pendant (about -0.227 m),
+which is 30 cm above the table in this cell. It is never commanded lower.
 """
 
 from __future__ import annotations
@@ -11,19 +10,21 @@ from __future__ import annotations
 import numpy as np
 
 # Safety plane. TCP Z is always TABLE_Z_ROBOT + this, never lower.
+# The four pendant readings sit on Z = -0.2272 m, so the table in the
+# base frame is 30 cm below that.
 HOVER_ABOVE_TABLE_M = 0.30
+TABLE_Z_ROBOT = -0.5272
 
-# Height of the table surface in the UR base frame (meters).
-# Jog the TCP until it just touches the table and paste that Z here.
-# With the base origin on the table, 0.0 is correct and the hover is Z = 0.30 m.
-TABLE_Z_ROBOT = 0.0
-
-# Camera (X, Z) → robot (X, Y), meters.
+# Camera (X, Z) → robot (X, Y), meters. Fit to the four taught corners (2.7 mm).
 # robot_xy = R @ [cam_x, cam_z] + t
-# Used when the robot link is turned on. The camera loop does not read this yet.
-CALIBRATED = False
-CAM_XZ_TO_ROBOT_R = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=float)
-CAM_XZ_TO_ROBOT_T = np.array([0.35, -0.15], dtype=float)
+CALIBRATED = True
+CAM_XZ_TO_ROBOT_R = np.array(
+    [[-0.73210148, 0.69091082], [0.65942076, 0.7020882]], dtype=float
+)
+CAM_XZ_TO_ROBOT_T = np.array([-0.05686844, -0.72815036], dtype=float)
+
+# Tool orientation from the pendant, radians. Kept fixed while tracking.
+TCP_ORIENTATION = [2.1705, -2.2980, 0.0465]
 
 # Motion limits
 MAX_STEP_M = 0.015       # max XY change sent per camera frame
