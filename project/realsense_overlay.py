@@ -94,6 +94,9 @@ def bind(lib: ctypes.CDLL) -> None:
 
     lib.rs2_create_context = f("rs2_create_context", P, ctypes.c_int, E)
     lib.rs2_delete_context = f("rs2_delete_context", None, P)
+    lib.rs2_query_devices = f("rs2_query_devices", P, P, E)
+    lib.rs2_get_device_count = f("rs2_get_device_count", ctypes.c_int, P, E)
+    lib.rs2_delete_device_list = f("rs2_delete_device_list", None, P)
     lib.rs2_create_pipeline = f("rs2_create_pipeline", P, P, E)
     lib.rs2_delete_pipeline = f("rs2_delete_pipeline", None, P)
     lib.rs2_create_config = f("rs2_create_config", P, E)
@@ -189,6 +192,16 @@ class RealSense:
         e = ctypes.byref(self._err)
         self.ctx = self.lib.rs2_create_context(RS2_API_VERSION, e)
         self._check()
+        devices = self.lib.rs2_query_devices(self.ctx, e)
+        self._check()
+        count = self.lib.rs2_get_device_count(devices, e)
+        self.lib.rs2_delete_device_list(devices)
+        self._check()
+        if count == 0:
+            raise RsError(
+                "No RealSense camera found. Check the USB cable/port "
+                "(lsusb should list 8086:0bxx) and the udev rule."
+            )
         self.pipe = self.lib.rs2_create_pipeline(self.ctx, e)
         self._check()
         self.cfg = self.lib.rs2_create_config(e)

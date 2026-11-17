@@ -91,7 +91,7 @@ def main() -> int:
         print("On macOS: sudo ./venv/bin/python project/follow_object.py")
         return 1
 
-    win = "Camera test — overlay | depth"
+    win = "Camera test - overlay | depth"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     try:
         while True:
