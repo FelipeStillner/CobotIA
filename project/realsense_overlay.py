@@ -5,7 +5,6 @@ pyrealsense2-macosx wheel.
 
 Usage (macOS needs sudo for USB):
     sudo ./venv/bin/python project/realsense_overlay.py
-    ./project/test_realsense_depth.sh
 
 Keys:
     q     quit
@@ -40,6 +39,19 @@ LIB_CANDIDATES = [
 
 class RsError(RuntimeError):
     pass
+
+
+class RsIntrinsics(ctypes.Structure):
+    _fields_ = [
+        ("width", ctypes.c_int),
+        ("height", ctypes.c_int),
+        ("ppx", ctypes.c_float),
+        ("ppy", ctypes.c_float),
+        ("fx", ctypes.c_float),
+        ("fy", ctypes.c_float),
+        ("model", ctypes.c_int),
+        ("coeffs", ctypes.c_float * 5),
+    ]
 
 
 def load_lib() -> ctypes.CDLL:
@@ -115,6 +127,28 @@ def bind(lib: ctypes.CDLL) -> None:
     )
     lib.rs2_get_error_message = f("rs2_get_error_message", ctypes.c_char_p, P)
     lib.rs2_free_error = f("rs2_free_error", None, P)
+    lib.rs2_pipeline_get_active_profile = f("rs2_pipeline_get_active_profile", P, P, E)
+    lib.rs2_pipeline_profile_get_streams = f("rs2_pipeline_profile_get_streams", P, P, E)
+    lib.rs2_delete_pipeline_profile = f("rs2_delete_pipeline_profile", None, P)
+    lib.rs2_get_stream_profiles_count = f(
+        "rs2_get_stream_profiles_count", ctypes.c_int, P, E
+    )
+    lib.rs2_get_stream_profile = f("rs2_get_stream_profile", P, P, ctypes.c_int, E)
+    lib.rs2_delete_stream_profiles_list = f("rs2_delete_stream_profiles_list", None, P)
+    lib.rs2_get_stream_profile_data = f(
+        "rs2_get_stream_profile_data",
+        None,
+        P,
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        E,
+    )
+    lib.rs2_get_video_stream_intrinsics = f(
+        "rs2_get_video_stream_intrinsics", None, P, ctypes.POINTER(RsIntrinsics), E
+    )
 
 
 class RealSense:
@@ -126,6 +160,8 @@ class RealSense:
         self.fps = fps
         self._err = ctypes.c_void_p()
         self.ctx = self.pipe = self.cfg = self.align = self.queue = None
+        self.intrinsics: dict | None = None
+        self.depth_scale_m: float | None = None
 
     def _check(self) -> None:
         if self._err:
@@ -153,12 +189,63 @@ class RealSense:
             self._check()
         self.lib.rs2_pipeline_start_with_config(self.pipe, self.cfg, e)
         self._check()
+        self._load_color_intrinsics()
         self.align = self.lib.rs2_create_align(RS2_STREAM_COLOR, e)
         self._check()
         self.queue = self.lib.rs2_create_frame_queue(1, e)
         self._check()
         self.lib.rs2_start_processing_queue(self.align, self.queue, e)
         self._check()
+
+    def _load_color_intrinsics(self) -> None:
+        e = ctypes.byref(self._err)
+        profile = self.lib.rs2_pipeline_get_active_profile(self.pipe, e)
+        self._check()
+        streams = self.lib.rs2_pipeline_profile_get_streams(profile, e)
+        self._check()
+        try:
+            count = self.lib.rs2_get_stream_profiles_count(streams, e)
+            self._check()
+            for i in range(count):
+                mode = self.lib.rs2_get_stream_profile(streams, i, e)
+                self._check()
+                stream = ctypes.c_int()
+                fmt = ctypes.c_int()
+                index = ctypes.c_int()
+                unique = ctypes.c_int()
+                fps = ctypes.c_int()
+                self.lib.rs2_get_stream_profile_data(
+                    mode,
+                    ctypes.byref(stream),
+                    ctypes.byref(fmt),
+                    ctypes.byref(index),
+                    ctypes.byref(unique),
+                    ctypes.byref(fps),
+                    e,
+                )
+                self._check()
+                if stream.value != RS2_STREAM_COLOR:
+                    continue
+                intr = RsIntrinsics()
+                self.lib.rs2_get_video_stream_intrinsics(mode, ctypes.byref(intr), e)
+                self._check()
+                self.intrinsics = {
+                    "fx": float(intr.fx),
+                    "fy": float(intr.fy),
+                    "ppx": float(intr.ppx),
+                    "ppy": float(intr.ppy),
+                    "width": int(intr.width),
+                    "height": int(intr.height),
+                }
+                print(
+                    f"Color intrinsics {intr.width}x{intr.height} "
+                    f"fx={intr.fx:.1f} fy={intr.fy:.1f}"
+                )
+                return
+        finally:
+            self.lib.rs2_delete_stream_profiles_list(streams)
+            self.lib.rs2_delete_pipeline_profile(profile)
+        print("Warning: color intrinsics not found")
 
     def _frame_array(self, frame, channels: int, dtype) -> np.ndarray:
         e = ctypes.byref(self._err)
@@ -225,6 +312,8 @@ class RealSense:
                 self.lib.rs2_depth_frame_get_distance(depth_handle, cx, cy, e)
             )
             self._check()
+            if depth[cy, cx] > 0 and z > 0:
+                self.depth_scale_m = z / float(depth[cy, cx])
             return color, depth, z
         finally:
             for f in extracted:

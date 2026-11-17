@@ -1,4 +1,0 @@
-opencv-python>=4.8
-numpy>=1.24
-pyrealsense2; platform_system == "Windows" or platform_system == "Linux"
-pyrealsense2-macosx; platform_system == "Darwin"
