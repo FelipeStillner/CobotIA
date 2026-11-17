@@ -10,7 +10,13 @@ TCP pose that would be used later (30 cm above the table). q quits.
 
 from __future__ import annotations
 
+import os
 import sys
+
+if sys.platform.startswith("linux"):
+    # opencv-python only ships the Qt xcb plugin; "wayland" in QT_QPA_PLATFORM
+    # makes window creation fail. Run through XWayland instead.
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
 from pathlib import Path
 
 import cv2

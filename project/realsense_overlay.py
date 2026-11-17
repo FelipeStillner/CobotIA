@@ -15,7 +15,13 @@ Keys:
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
+
+if sys.platform.startswith("linux"):
+    # opencv-python only ships the Qt xcb plugin; "wayland" in QT_QPA_PLATFORM
+    # makes window creation fail. Run through XWayland instead.
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
 from pathlib import Path
 
 import cv2
@@ -34,7 +40,23 @@ RS2_EXTENSION_DEPTH_FRAME = 12
 LIB_CANDIDATES = [
     "/opt/homebrew/lib/librealsense2.dylib",
     "/usr/local/lib/librealsense2.dylib",
+    "librealsense2.so",  # Linux system install (e.g. AUR librealsense)
 ]
+
+
+def _pyrealsense2_lib() -> str | None:
+    """Linux pyrealsense2 wheels statically embed librealsense and export the C API."""
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("pyrealsense2")
+    except Exception:
+        return None
+    if not spec or not spec.submodule_search_locations:
+        return None
+    pkg = Path(next(iter(spec.submodule_search_locations)))
+    hits = sorted(pkg.glob("pyrealsense2.cpython-*.so"))
+    return str(hits[0]) if hits else None
 
 
 class RsError(RuntimeError):
@@ -56,14 +78,18 @@ class RsIntrinsics(ctypes.Structure):
 
 def load_lib() -> ctypes.CDLL:
     last = None
-    for path in LIB_CANDIDATES:
+    candidates = list(LIB_CANDIDATES)
+    if (wheel := _pyrealsense2_lib()) is not None:
+        candidates.append(wheel)
+    for path in candidates:
         try:
             return ctypes.CDLL(path)
         except OSError as exc:
             last = exc
     raise SystemExit(
-        "Could not load librealsense2.dylib.\n"
-        "Install with: brew install librealsense\n"
+        "Could not load librealsense2.\n"
+        "macOS: brew install librealsense\n"
+        "Linux: uv pip install pyrealsense2 (into the venv)\n"
         f"Last error: {last}"
     )
 

@@ -15,7 +15,13 @@ Clicks count on the left image only.
 
 from __future__ import annotations
 
+import os
 import sys
+
+if sys.platform.startswith("linux"):
+    # opencv-python only ships the Qt xcb plugin; "wayland" in QT_QPA_PLATFORM
+    # makes window creation fail. Run through XWayland instead.
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
 from pathlib import Path
 
 import cv2
@@ -27,7 +33,7 @@ from calibration import circular_mean_hue, save_calibration
 from detect_object import deproject
 from realsense_overlay import RealSense, RsError, blend_overlay
 
-WIN = "Calibrate — click the left image"
+WIN = "Calibrate - click the left image"  # ASCII only: Qt highgui fails on non-ASCII names
 state = {
     "phase": "corners",
     "corners": [],
