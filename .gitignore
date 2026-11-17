@@ -1,0 +1,6 @@
+docs/
+venv/
+deliver/
+**/__pycache__/
+MobileNet**
+captures
