@@ -204,15 +204,12 @@ def save_from_clicks() -> bool:
         orientation_error_rad(a, b) for a in orientations for b in orientations
     )
     data = {
-        "corners_px": [[c["u"], c["v"]] for c in corners],
         "corners_xz": corners_xz,
-        "corners_robot_xyz": corners_robot,
         "cam_xz_to_robot_R": rotation.tolist(),
         "cam_xz_to_robot_t": translation.tolist(),
         "hover_z": hover,
         # Tool orientation for tracking: corner 1's, read from the robot.
         "tcp_orientation": orientations[0],
-        "corners_orientation": orientations,
         "hue_center": circular_mean_hue(hues),
         "hue_tol": 12,
         "s_low": int(max(0, np.median(sats) - 50)),

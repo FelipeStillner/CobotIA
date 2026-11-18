@@ -15,9 +15,7 @@ from config import MIN_OBJECT_AREA_PX
 class Detection:
     u: float
     v: float
-    depth_m: float
     cam_x: float
-    cam_y: float
     cam_z: float
     contour: np.ndarray
 
@@ -90,7 +88,7 @@ def detect_object(
     if samples.size == 0:
         return None
     z = float(np.median(samples))
-    cam_x, cam_y, cam_z = deproject(
+    cam_x, _cam_y, cam_z = deproject(
         u, v, z, intrinsics["fx"], intrinsics["fy"], intrinsics["ppx"], intrinsics["ppy"]
     )
-    return Detection(u, v, z, cam_x, cam_y, cam_z, contour)
+    return Detection(u, v, cam_x, cam_z, contour)
