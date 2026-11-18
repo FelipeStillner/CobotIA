@@ -1,6 +1,7 @@
 """Pad check and the pose sent to the robot.
 
-Z is locked to the average of the four corner heights typed in calibrate.py.
+Z is locked to the average of the four corner heights typed in calibrate.py,
+and that height must be at least HOVER_ABOVE_TABLE_M above TABLE_Z_ROBOT.
 """
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 from calibration import load_calibration, xz_inside
-from config import HOVER_ABOVE_TABLE_M
+from config import HOVER_ABOVE_TABLE_M, TABLE_Z_ROBOT
 
 
 def _robot_map() -> tuple[np.ndarray, np.ndarray] | None:
@@ -32,6 +33,18 @@ def hover_z() -> float | None:
     if not calib or calib.get("hover_z") is None:
         return None
     return float(calib["hover_z"])
+
+
+def tcp_orientation() -> list[float]:
+    """Tool rotation vector for tracking, read from the robot by calibrate.py."""
+    calib = load_calibration()
+    rv = calib.get("tcp_orientation") if calib else None
+    if rv is None or len(rv) != 3:
+        raise RuntimeError(
+            "No tool orientation in calibration.json. Re-run calibrate.py "
+            "(it reads the corner poses from the robot)."
+        )
+    return [float(v) for v in rv]
 
 
 def in_camera_workspace(cam_x: float, cam_z: float) -> bool:
@@ -63,34 +76,79 @@ def target_over_object(cam_x: float, cam_z: float) -> list[float] | None:
     return [xy[0], xy[1], z]
 
 
-def enforce_hover(pose: list[float]) -> list[float]:
-    """Copy of pose with Z on or above the hover plane.
+def table_floor_z() -> float:
+    """Lowest Z the TCP may ever be commanded to: table + hover height."""
+    if TABLE_Z_ROBOT is None:
+        raise RuntimeError(
+            "TABLE_Z_ROBOT is not measured. Touch the TCP to the pad, read Z on the "
+            "pendant with Feature = Base, and set it in config.py."
+        )
+    return TABLE_Z_ROBOT + HOVER_ABOVE_TABLE_M
 
-    Raises if a caller tries to command anything below the typed corner height.
+
+def check_hover_plane() -> float:
+    """The hover Z, after checking it clears the table by HOVER_ABOVE_TABLE_M.
+
+    Raises if calibrate.py has not saved a height, or if the typed corner
+    heights put the hover plane too close to the table.
     """
-    if len(pose) < 3:
-        raise ValueError("pose needs at least x, y, z")
-    floor = hover_z()
-    if floor is None:
+    z = hover_z()
+    if z is None:
         raise RuntimeError(
             "No hover height yet. Run calibrate.py and enter X Y Z for each corner."
         )
+    floor = table_floor_z()
+    if z < floor - 1e-6:
+        raise RuntimeError(
+            f"Hover Z={z:.4f} m is only {z - TABLE_Z_ROBOT:.3f} m above the table "
+            f"(TABLE_Z_ROBOT={TABLE_Z_ROBOT:.4f}); need {HOVER_ABOVE_TABLE_M:.2f} m. "
+            "Re-check the corner Z values in calibrate.py or TABLE_Z_ROBOT in config.py."
+        )
+    return z
+
+
+def enforce_hover(pose: list[float]) -> list[float]:
+    """Copy of pose, checked to be on or above the hover plane.
+
+    Raises if a caller tries to command anything below the hover plane or
+    below table + HOVER_ABOVE_TABLE_M.
+    """
+    if len(pose) < 3:
+        raise ValueError("pose needs at least x, y, z")
+    floor = max(check_hover_plane(), table_floor_z())
     if pose[2] < floor - 1e-6:
         raise RuntimeError(
-            f"Refusing Z={pose[2]:.4f} m — below the {HOVER_ABOVE_TABLE_M:.2f} m "
-            f"hover floor (Z >= {floor:.4f} m)"
+            f"Refusing Z={pose[2]:.4f} m — below the hover floor (Z >= {floor:.4f} m)"
         )
-    out = list(pose)
-    out[2] = max(float(out[2]), floor)
-    return out
+    return list(pose)
 
 
-def limit_step(current_xy: tuple[float, float], target_xy: tuple[float, float], max_step: float) -> tuple[float, float]:
-    """Move at most max_step meters from current toward target."""
-    dx = target_xy[0] - current_xy[0]
-    dy = target_xy[1] - current_xy[1]
-    dist = float(np.hypot(dx, dy))
+def limit_step(current, target, max_step: float) -> tuple[float, ...]:
+    """Move at most max_step meters from current toward target.
+
+    Works for XY or XYZ; the limit is on the straight-line distance.
+    """
+    cur = np.asarray(current, dtype=float)
+    tgt = np.asarray(target, dtype=float)
+    delta = tgt - cur
+    dist = float(np.linalg.norm(delta))
     if dist <= max_step or dist == 0.0:
-        return target_xy
-    scale = max_step / dist
-    return (current_xy[0] + dx * scale, current_xy[1] + dy * scale)
+        return tuple(float(v) for v in tgt)
+    return tuple(float(v) for v in cur + delta * (max_step / dist))
+
+
+def _rotvec_to_matrix(rotvec) -> np.ndarray:
+    r = np.asarray(rotvec, dtype=float)
+    angle = float(np.linalg.norm(r))
+    if angle < 1e-12:
+        return np.eye(3)
+    k = r / angle
+    kx = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(angle) * kx + (1 - np.cos(angle)) * (kx @ kx)
+
+
+def orientation_error_rad(rotvec_a, rotvec_b) -> float:
+    """Angle between two UR rotation vectors (axis-angle), radians."""
+    rel = _rotvec_to_matrix(rotvec_a).T @ _rotvec_to_matrix(rotvec_b)
+    cos = (float(np.trace(rel)) - 1.0) / 2.0
+    return float(np.arccos(np.clip(cos, -1.0, 1.0)))
