@@ -2,8 +2,9 @@
 
 The robot must be in Remote Control and the workspace clear.
 
-    sudo ./.venv/bin/python project/follow_object.py                 # URSim
-    sudo ./.venv/bin/python project/follow_object.py 100.65.63.94 --i-understand
+    sudo ./.venv/bin/python project/follow_object.py                 # URSim at 127.0.0.1
+    sudo ./.venv/bin/python project/follow_object.py --real          # real UR5 at config.ROBOT_IP
+    sudo ./.venv/bin/python project/follow_object.py --real 10.0.0.5 # real UR5 at another IP
 
 Before tracking, the TCP makes one slow straight-line move onto the hover
 plane with the fixed tool orientation; you confirm it in the terminal.
@@ -99,21 +100,26 @@ def draw_status(overlay, det, target, note: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Follow the object with the UR5 TCP")
-    parser.add_argument("ip", nargs="?", default="127.0.0.1", help=f"robot IP (real robot: {ROBOT_IP})")
     parser.add_argument(
-        "--i-understand",
+        "ip",
+        nargs="?",
+        help=f"robot IP (default: 127.0.0.1, or {ROBOT_IP} with --real)",
+    )
+    parser.add_argument(
+        "--real",
         action="store_true",
-        help="Required for non-localhost execution",
+        help=f"drive the real robot (default IP {ROBOT_IP}); without it only URSim on localhost is allowed",
     )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    if args.ip not in ("127.0.0.1", "localhost", "::1") and not args.i_understand:
-        print("Refusing non-localhost robot without --i-understand")
+    ip = args.ip or (ROBOT_IP if args.real else "127.0.0.1")
+    if ip not in ("127.0.0.1", "localhost", "::1") and not args.real:
+        print(f"{ip} is not URSim on localhost. Add --real to drive the real robot.")
         return 1
-    robot.ip = args.ip
+    robot.ip = ip
     signal.signal(signal.SIGINT, on_sigint)
     if not has_robot_map():
         print("No robot corners yet. Run calibrate.py and type X Y Z for each corner.")
