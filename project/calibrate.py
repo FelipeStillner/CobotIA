@@ -204,6 +204,8 @@ def save_from_clicks() -> bool:
         orientation_error_rad(a, b) for a in orientations for b in orientations
     )
     data = {
+        # Pixel corners: follow_object.py draws the calibrated area from these.
+        "corners_px": [[c["u"], c["v"]] for c in corners],
         "corners_xz": corners_xz,
         "cam_xz_to_robot_R": rotation.tolist(),
         "cam_xz_to_robot_t": translation.tolist(),

@@ -33,8 +33,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from calibration import xz_inside
-from detect_object import detect_object
+from calibration import load_calibration, xz_inside
+from detect_object import ClosestObjectPicker, detect_objects
 from realsense_overlay import RealSense, RsError, blend_overlay
 from config import HOVER_ABOVE_TABLE_M, MAX_SPEED_M_S, ROBOT_IP, TABLE_Z_ROBOT
 from robot import Robot
@@ -47,6 +47,27 @@ def on_sigint(signum, frame):
     print("\nCtrl+C — stopping")
     robot.disconnect()
     raise SystemExit(0)
+
+
+AREA_COLOR = (0, 255, 255)  # BGR yellow: the calibrated pad outline
+
+
+def draw_calibrated_area(image):
+    """Outline the four pad corners clicked in calibrate.py, numbered in click order."""
+    calib = load_calibration()
+    corners = calib.get("corners_px") if calib else None
+    if not corners or len(corners) < 3:
+        return image
+    out = image.copy()
+    pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
+    cv2.polylines(out, [pts], True, AREA_COLOR, 2, cv2.LINE_AA)
+    for i, (u, v) in enumerate(corners, start=1):
+        cv2.circle(out, (int(u), int(v)), 5, AREA_COLOR, -1, cv2.LINE_AA)
+        cv2.putText(
+            out, str(i), (int(u) + 7, int(v) - 7),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6, AREA_COLOR, 2, cv2.LINE_AA,
+        )
+    return out
 
 
 def paint_workspace(image, depth_u16, depth_scale_m, intrinsics):
@@ -68,9 +89,22 @@ def paint_workspace(image, depth_u16, depth_scale_m, intrinsics):
     return out
 
 
-def draw_status(overlay, det, target, note: str) -> None:
+OTHER_COLOR = (255, 0, 255)  # BGR magenta: objects seen but not tracked
+
+
+def draw_status(overlay, det, target, note: str, others=()) -> None:
+    for other in others:
+        cv2.drawContours(overlay, [other.contour], -1, OTHER_COLOR, 1)
+        cv2.putText(
+            overlay, f"{other.distance_m:.2f} m", (int(other.u) + 8, int(other.v)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.45, OTHER_COLOR, 1, cv2.LINE_AA,
+        )
     if det is not None:
         cv2.drawContours(overlay, [det.contour], -1, (0, 255, 0), 2)
+        cv2.putText(
+            overlay, f"TARGET {det.distance_m:.2f} m", (int(det.u) + 10, int(det.v) - 10),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA,
+        )
         cv2.drawMarker(
             overlay,
             (int(det.u), int(det.v)),
@@ -80,7 +114,10 @@ def draw_status(overlay, det, target, note: str) -> None:
             2,
         )
         where = "INSIDE pad" if in_camera_workspace(det.cam_x, det.cam_z) else "OUTSIDE pad"
-        lines = [f"object cam X={det.cam_x:.3f} Z={det.cam_z:.3f} m  {where}"]
+        lines = [
+            f"{len(others) + 1} object(s), tracking the closest",
+            f"object cam X={det.cam_x:.3f} Z={det.cam_z:.3f} m  {where}",
+        ]
         if target is not None:
             lines.append(
                 f"TCP  X={target[0]:.3f} Y={target[1]:.3f} Z={target[2]:.3f} m"
@@ -179,23 +216,26 @@ def main() -> int:
     log_file = open(log_path, "w", newline="")
     log = csv.writer(log_file)
     log.writerow([
-        "t_s", "status", "det_u", "det_v", "cam_x", "cam_z", "inside_pad",
+        "t_s", "status", "n_objects", "det_u", "det_v", "cam_x", "cam_z", "distance_m", "inside_pad",
         "target_x", "target_y", "actual_x", "actual_y", "actual_z", "sent_x", "sent_y", "sent_z",
     ])
     print(f"Logging every frame to {log_path}")
     t_start = time.monotonic()
     last_status = None
+    picker = ClosestObjectPicker()
 
     try:
         while True:
             color, depth, _center_z = cam.wait_aligned()
             det = None
+            detections = []
             target = None
             inside = None
             robot.last_actual = robot.last_sent = None
             status = "no object - not moving"
             if cam.intrinsics is not None and cam.depth_scale_m:
-                det = detect_object(depth, cam.depth_scale_m, cam.intrinsics, color)
+                detections = detect_objects(depth, cam.depth_scale_m, cam.intrinsics, color)
+                det = picker.pick(detections)
                 if det is not None:
                     inside = in_camera_workspace(det.cam_x, det.cam_z)
                     target = target_over_object(det.cam_x, det.cam_z) if inside else None
@@ -218,7 +258,10 @@ def main() -> int:
             if cam.intrinsics is not None:
                 overlay = paint_workspace(overlay, depth, scale, cam.intrinsics)
                 heat = paint_workspace(heat, depth, scale, cam.intrinsics)
-            draw_status(overlay, det, target, status)
+            overlay = draw_calibrated_area(overlay)
+            heat = draw_calibrated_area(heat)
+            others = [d for d in detections if d is not det]
+            draw_status(overlay, det, target, status, others)
             kind = status.split(" (")[0]
             if kind != last_status:
                 print(f"[{time.monotonic() - t_start:7.1f} s] {status}")
@@ -226,9 +269,10 @@ def main() -> int:
             actual = robot.last_actual or [None] * 3
             sent = robot.last_sent or [None] * 3
             log.writerow([
-                round(time.monotonic() - t_start, 3), status,
+                round(time.monotonic() - t_start, 3), status, len(detections),
                 det.u if det else None, det.v if det else None,
-                det.cam_x if det else None, det.cam_z if det else None, inside,
+                det.cam_x if det else None, det.cam_z if det else None,
+                round(det.distance_m, 4) if det else None, inside,
                 target[0] if target else None, target[1] if target else None,
                 actual[0], actual[1], actual[2], sent[0], sent[1], sent[2],
             ])

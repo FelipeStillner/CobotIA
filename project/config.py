@@ -28,7 +28,7 @@ HOVER_ABOVE_TABLE_M = 0.20
 # its servo time and moves at most MAX_SPEED_M_S * dt from the actual TCP, so
 # the TCP cannot go faster than MAX_SPEED_M_S however fast the loop runs, and
 # a slow frame cannot turn into a big jump (max step MAX_SPEED_M_S * MAX_SERVO_TIME).
-MAX_SPEED_M_S = 0.3
+MAX_SPEED_M_S = 0.2
 SERVO_TIME = 1.0 / 30.0     # dt for the first command after a start or hold
 MIN_SERVO_TIME = 0.008
 MAX_SERVO_TIME = 0.2
@@ -41,9 +41,17 @@ HOVER_Z_TOL_M = 0.005
 ORIENTATION_TOL_RAD = math.radians(3.0)
 
 # Slow straight-line move onto the hover plane before tracking starts.
-APPROACH_SPEED = 0.15       # m/s
+APPROACH_SPEED = 0.1      # m/s
 APPROACH_ACCEL = 0.05      # m/s^2
 
 ROBOT_IP = "100.65.63.94"
 
 MIN_OBJECT_AREA_PX = 400
+
+# Several objects: the one closest to the camera (straight-line distance from
+# the lens) is tracked. To stop depth noise flipping between two objects at
+# about the same distance, the tracked one is only dropped for another that is
+# at least this much closer. 0 = always the closest, every frame.
+OBJECT_SWITCH_MARGIN_M = 0.02
+# A detection within this many pixels of last frame's target is the same object.
+OBJECT_MATCH_PX = 50
