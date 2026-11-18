@@ -1,17 +1,14 @@
-"""Track the object with the UR5 TCP on the taught hover plane.
+"""Track the object by sending servoL to the UR5.
 
-Preview (no motion):
+The robot must be in Remote Control and the workspace clear.
+
     python project/follow_object.py
 
-Move the robot (Remote Control, workspace clear):
-    python project/follow_object.py --execute
-
-q quits and stops the robot.
+q or Ctrl+C stops the robot and disconnects.
 """
 
 from __future__ import annotations
 
-import argparse
 import os
 import signal
 import sys
@@ -31,7 +28,7 @@ from calibration import xz_inside
 from detect_object import detect_object
 from realsense_overlay import RealSense, RsError, blend_overlay
 from robot import Robot
-from safety import hover_z, in_camera_workspace, target_over_object
+from safety import has_robot_map, hover_z, in_camera_workspace, target_over_object
 
 robot = Robot()
 
@@ -92,20 +89,19 @@ def draw_status(overlay, det, target, note: str) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Follow the object with the UR5")
-    parser.add_argument("--execute", action="store_true", help="Send TCP poses to the robot")
-    args = parser.parse_args()
-
     signal.signal(signal.SIGINT, on_sigint)
-    print(f"Hover plane Z = {hover_z():.4f} m (never lower)")
-    note = "preview — robot not moving"
-    if args.execute:
-        try:
-            robot.connect()
-        except Exception as exc:
-            print("Robot connection failed:", exc)
-            return 1
-        note = "sending to robot"
+    z_hover = hover_z()
+    if not has_robot_map() or z_hover is None:
+        print("No robot corners yet. Run calibrate.py and type X Y Z for each corner.")
+        return 1
+    print(f"Hover plane Z = {z_hover:.4f} m (never lower)")
+    try:
+        robot.connect()
+    except Exception as exc:
+        print("Robot connection failed:", exc)
+        return 1
+    note = "sending servoL"
+    holding = False
 
     cam = RealSense()
     try:
@@ -127,13 +123,21 @@ def main() -> int:
             if cam.intrinsics is not None and cam.depth_scale_m:
                 det = detect_object(depth, cam.depth_scale_m, cam.intrinsics, color)
                 if det is not None:
-                    target = target_over_object(det.cam_x, det.cam_z)
-                    if args.execute and target is not None:
+                    inside = in_camera_workspace(det.cam_x, det.cam_z)
+                    target = target_over_object(det.cam_x, det.cam_z) if inside else None
+                    if target is not None:
+                        holding = False
                         try:
                             status = robot.track(target)
                         except Exception as exc:
                             status = f"move rejected: {exc}"
-                    elif args.execute:
+                            robot.hold()
+                    elif not holding:
+                        holding = True
+                        robot.hold()
+                        print("holding — outside pad")
+                        status = "outside pad — holding"
+                    else:
                         status = "outside pad — holding"
             scale = cam.depth_scale_m if cam.depth_scale_m else 0.001
             overlay, heat = blend_overlay(color, depth, 0.45, scale)

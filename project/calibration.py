@@ -58,6 +58,27 @@ def xz_inside(x, z) -> np.ndarray:
     return points_in_polygon(x, z, calib["corners_xz"])
 
 
+def fit_camera_to_robot(corners_xz, corners_robot_xyz):
+    """Least-squares map from camera (X, Z) to robot (X, Y).
+
+    Returns R (2×2), t (2,), per-corner XY error in meters, and the hover
+    height (mean of the four robot Z values).
+    robot_xy = R @ [cam_x, cam_z] + t
+    """
+    cam = np.asarray(corners_xz, dtype=float)
+    robot = np.asarray(corners_robot_xyz, dtype=float)
+    if cam.shape != (4, 2) or robot.shape != (4, 3):
+        raise ValueError("need 4 camera (X, Z) points and 4 robot (X, Y, Z) points")
+    design = np.column_stack([cam, np.ones(4)])
+    solved, *_ = np.linalg.lstsq(design, robot[:, :2], rcond=None)
+    rotation = solved[:2].T
+    translation = solved[2]
+    predicted = cam @ rotation.T + translation
+    error_m = np.linalg.norm(predicted - robot[:, :2], axis=1)
+    hover = float(np.mean(robot[:, 2]))
+    return rotation, translation, error_m, hover
+
+
 def circular_mean_hue(hues) -> float:
     """Mean of OpenCV hues (0–179)."""
     ang = np.deg2rad(np.asarray(hues, dtype=float) * 2.0)

@@ -1,13 +1,15 @@
-"""Click the pad corners and the object, then save project/calibration.json.
+"""Click each pad corner, type its robot X Y Z, then sample the object.
 
 Nothing is sent to the robot.
 
     sudo ./venv/bin/python project/calibrate.py
 
-1. Click the 4 corners of the pad, in order around the edge.
-2. Press n.
-3. Click the object a few times (the color is sampled around each click).
-4. Press s to save.
+1. Click corner 1 on the left image.
+2. In this terminal, type that corner's pendant X Y Z in millimeters.
+3. Repeat for the other 3 corners, in order around the edge.
+4. Press n.
+5. Click the object a few times (the color is sampled around each click).
+6. Press s to save.
 
 u undoes the last click. q quits without saving.
 Clicks count on the left image only.
@@ -29,7 +31,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from calibration import circular_mean_hue, save_calibration
+from calibration import circular_mean_hue, fit_camera_to_robot, save_calibration
 from detect_object import deproject
 from realsense_overlay import RealSense, RsError, blend_overlay
 
@@ -85,7 +87,7 @@ def on_mouse(event, x, y, flags, param):
         depth_m = raw * state["scale"]
         cam_x, _cam_y, cam_z = deproject(x, y, depth_m, intr["fx"], intr["fy"], intr["ppx"], intr["ppy"])
         state["corners"].append({"u": x, "v": y, "x": cam_x, "z": cam_z})
-        state["message"] = f"corner {len(state['corners'])}/4"
+        state["message"] = f"corner {len(state['corners'])}/4 — type X Y Z in the terminal"
         return
 
     hsv = cv2.cvtColor(color, cv2.COLOR_BGR2HSV)
@@ -110,8 +112,9 @@ def draw(color, heat):
             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA,
         )
     if state["phase"] == "corners":
+        done = sum(1 for c in corners if "robot" in c)
         lines = [
-            "Click 4 pad corners in order around the edge",
+            f"Click corner {min(done + 1, 4)}/4, then type its robot X Y Z",
             "n next   u undo   q quit",
         ]
     else:
@@ -139,16 +142,80 @@ def undo():
         state["message"] = f"corner {len(state['corners'])}/4"
 
 
+def parse_robot_xyz(raw: str) -> list[float] | None:
+    """Three pendant numbers to meters. None when the text is not a pose."""
+    text = raw.strip()
+    if not text:
+        return None
+    parts = text.split()
+    if len(parts) == 1:
+        parts = [part for part in parts[0].split(",") if part.strip()]
+    cleaned = []
+    for part in parts:
+        part = part.strip().strip(",")
+        if not part:
+            continue
+        if "," in part and "." not in part:
+            part = part.replace(",", ".")
+        cleaned.append(part)
+    if len(cleaned) != 3:
+        return None
+    try:
+        vals = [float(part) for part in cleaned]
+    except ValueError:
+        return None
+    if max(abs(v) for v in vals) < 5.0:
+        return vals
+    return [v / 1000.0 for v in vals]
+
+
+def ask_robot_xyz(index: int) -> list[float] | None:
+    """Read one corner from the terminal. None undoes that click."""
+    print()
+    print(f"Corner {index} of 4")
+    print("Type the pendant X Y Z in millimeters. Example: 75.3 -358.1 -227.1")
+    print("u undoes this corner.")
+    while True:
+        try:
+            raw = input("> ").strip()
+        except EOFError:
+            return None
+        if raw.lower() in {"u", "undo"}:
+            return None
+        pose = parse_robot_xyz(raw)
+        if pose is None:
+            print("Need three numbers: X Y Z")
+            continue
+        shown = [round(v * 1000.0, 1) for v in pose]
+        print(f"  saved {shown[0]} {shown[1]} {shown[2]} mm")
+        return pose
+
+
+def pending_corner() -> dict | None:
+    missing = [corner for corner in state["corners"] if "robot" not in corner]
+    if not missing or state["phase"] != "corners":
+        return None
+    return missing[-1]
+
+
 def save_from_clicks() -> bool:
-    if len(state["corners"]) != 4 or not state["colors"]:
-        state["message"] = "need 4 corners and at least one object click"
+    corners = state["corners"]
+    if len(corners) != 4 or any("robot" not in c for c in corners) or not state["colors"]:
+        state["message"] = "need 4 corners with X Y Z, and at least one object click"
         return False
     hues = [c[0] for c in state["colors"]]
     sats = [c[1] for c in state["colors"]]
     vals = [c[2] for c in state["colors"]]
+    corners_xz = [[c["x"], c["z"]] for c in corners]
+    corners_robot = [c["robot"] for c in corners]
+    rotation, translation, error_m, hover = fit_camera_to_robot(corners_xz, corners_robot)
     data = {
-        "corners_px": [[c["u"], c["v"]] for c in state["corners"]],
-        "corners_xz": [[c["x"], c["z"]] for c in state["corners"]],
+        "corners_px": [[c["u"], c["v"]] for c in corners],
+        "corners_xz": corners_xz,
+        "corners_robot_xyz": corners_robot,
+        "cam_xz_to_robot_R": rotation.tolist(),
+        "cam_xz_to_robot_t": translation.tolist(),
+        "hover_z": hover,
         "hue_center": circular_mean_hue(hues),
         "hue_tol": 12,
         "s_low": int(max(0, np.median(sats) - 50)),
@@ -156,15 +223,23 @@ def save_from_clicks() -> bool:
     }
     save_calibration(data)
     print("Saved", Path(__file__).resolve().parent / "calibration.json")
+    print(f"  hover Z = {hover * 1000:.1f} mm")
+    spread = (max(c[2] for c in corners_robot) - min(c[2] for c in corners_robot)) * 1000.0
+    if spread > 20.0:
+        print(f"  the four Z values differ by {spread:.1f} mm; hover uses their average")
+    for i, err in enumerate(error_m, start=1):
+        robot = corners_robot[i - 1]
+        print(
+            f"  corner {i}: robot {robot[0] * 1000:.1f} {robot[1] * 1000:.1f} "
+            f"{robot[2] * 1000:.1f} mm, fit error {err * 1000:.1f} mm"
+        )
     print(f"  hue {data['hue_center']:.1f} ± {data['hue_tol']}, S>={data['s_low']}, V>={data['v_low']}")
-    for i, (x, z) in enumerate(data["corners_xz"], start=1):
-        print(f"  corner {i}: X={x:.3f} m  Z={z:.3f} m")
     return True
 
 
 def main() -> int:
     print("Calibration. No robot connection.")
-    print("Click 4 corners on the left image, press n, click the object, press s.")
+    print("Click a corner on the left image, then type its pendant X Y Z here.")
     cam = RealSense()
     try:
         cam.start()
@@ -191,13 +266,25 @@ def main() -> int:
             if key == ord("u"):
                 undo()
             if key == ord("n") and state["phase"] == "corners":
-                if len(state["corners"]) == 4:
+                if len(state["corners"]) == 4 and pending_corner() is None:
                     state["phase"] = "object"
                     state["message"] = "click the object"
                 else:
-                    state["message"] = "need 4 corners first"
+                    state["message"] = "need 4 corners, each with X Y Z"
             if key == ord("s") and save_from_clicks():
                 break
+            corner = pending_corner()
+            if corner is not None:
+                state["message"] = f"corner {len(state['corners'])}/4 — type X Y Z in the terminal"
+                cv2.imshow(WIN, draw(color, heat))
+                cv2.waitKey(1)
+                pose = ask_robot_xyz(len(state["corners"]))
+                if pose is None:
+                    state["corners"].pop()
+                    state["message"] = f"corner {len(state['corners'])}/4"
+                else:
+                    corner["robot"] = pose
+                    state["message"] = f"corner {len(state['corners'])}/4 recorded"
     finally:
         cam.stop()
         cv2.destroyAllWindows()
