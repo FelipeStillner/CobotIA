@@ -27,7 +27,7 @@ class Detection:
     cam_z: float
     contour: np.ndarray
     distance_m: float   # straight-line distance from the camera lens
-    height_m: float     # top of the object above the table, meters
+    height_m: float     # center of the object above the table, meters
 
 
 def deproject(u: float, v: float, depth_m: float, fx: float, fy: float, ppx: float, ppy: float):
@@ -93,15 +93,17 @@ def _plane_from_points(cam_x, cam_y, cam_z):
     return coeff, residual
 
 
-def fit_table_plane(depth_m, valid, on_pad, intrinsics):
-    """cam_y = a*cam_x + b*cam_z + c for the pad.
+def fit_table_plane(depth_m, valid, surface, intrinsics):
+    """cam_y = a*cam_x + b*cam_z + c for the table surface.
 
     Camera Y points down, so a higher point has a smaller cam_y.
-    Two fits drop pixels more than 1.5 cm above the plane, so the object
-    itself does not tilt the table. Returns None when the pad is not a
-    clear plane.
+    `surface` is the clicked table rectangle, not the air column above the
+    pad: that column contains the robot and the object, and fitting through
+    it lifts the plane until the object height reads zero.
+    Two fits drop pixels more than 1.5 cm above the plane. Returns None
+    when the table is not a clear plane.
     """
-    table = valid & on_pad
+    table = valid & surface
     idx = np.flatnonzero(table)
     if idx.size < 200:
         return None
@@ -152,11 +154,12 @@ def height_above_table(cam_x: float, cam_y: float, cam_z: float, plane) -> float
 
 
 def height_of_mask(depth_m, selected, intrinsics, plane) -> float:
-    """Height of the top of a region above the table plane.
+    """Height of the center of a region above the table.
 
-    Each pixel is measured with its own depth. The result is the median of
-    the upper quarter, so the table showing through the mask does not pull
-    the height down to zero, and a few wild depth pixels do not set it.
+    The object sits on the table, so its center is half the height of its top.
+    The top is a high percentile of the pixels that clear the table. The
+    median is not the center: most of the mask is the base, and depth that
+    falls through to the tabletop, so the median stays near zero.
     """
     if plane is None:
         return 0.0
@@ -164,17 +167,19 @@ def height_of_mask(depth_m, selected, intrinsics, plane) -> float:
     if rows.size < 20:
         return 0.0
     cam_x, cam_y, cam_z = _cam_points(rows, cols, depth_m, intrinsics)
+    # Camera Y points down. The plane predicts the table's cam_y, so a point
+    # above the table is this many meters higher.
     height = float(plane[0]) * cam_x + float(plane[1]) * cam_z + float(plane[2]) - cam_y
     height = height[np.isfinite(height)]
+    height = height[(height > -0.05) & (height < 0.50)]
     if height.size < 20:
         return 0.0
-    # Pixels on the object stand above the table. The table seen through the
-    # mask stays near zero and must not be part of the average.
-    above = height[height > 0.008]
-    if above.size >= 15:
-        band = above[above >= np.percentile(above, 80)]
-        return float(np.clip(np.median(band), 0.0, 0.50))
-    return float(np.clip(np.median(height), 0.0, 0.50))
+    raised = height[height > 0.015]
+    if raised.size >= 15:
+        top = float(np.percentile(raised, 90))
+    else:
+        top = float(max(0.0, np.percentile(height, 90)))
+    return float(np.clip(top * 0.5, 0.0, 0.50))
 
 
 def detect_objects(
@@ -200,7 +205,11 @@ def detect_objects(
     colored = valid & color_mask(color_bgr, calib)
     on_table = table_pixel_mask(depth_u16.shape, calib)
     foreground = colored & (on_table | on_pad)
-    plane = fit_table_plane(depth_m, valid, on_pad, intrinsics)
+    # Fit the tabletop itself. The pad column also holds the robot, and that
+    # fit makes every object height come out near zero.
+    plane = fit_table_plane(depth_m, valid, on_table & ~colored, intrinsics)
+    if plane is None:
+        plane = fit_table_plane(depth_m, valid, on_table, intrinsics)
     mask = (foreground.astype(np.uint8)) * 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))

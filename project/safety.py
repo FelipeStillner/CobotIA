@@ -108,9 +108,9 @@ def camera_xz_to_robot_xy(cam_x: float, cam_z: float) -> tuple[float, float] | N
 
 
 def tcp_z_for_height(height_m: float) -> float:
-    """Base Z one clearance above the top of the object, never below the floor.
+    """Base Z one clearance above the center of the object, never below the floor.
 
-    height_m is how far the top of the object sits above the table.
+    height_m is how far the center of the object sits above the table.
     """
     if TABLE_Z_ROBOT is None:
         raise RuntimeError(
@@ -122,7 +122,7 @@ def tcp_z_for_height(height_m: float) -> float:
 
 
 def target_over_object(cam_x: float, cam_z: float, height_m: float = 0.0) -> list[float] | None:
-    """Robot [x, y, z] one clearance above the top of the object, or None outside the pad.
+    """Robot [x, y, z] one clearance above the center of the object, or None outside the pad.
 
     Z follows the object's height above the table and never goes below the floor.
     """

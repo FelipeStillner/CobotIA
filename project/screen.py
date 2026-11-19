@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 
 from calibration import load_calibration
-from detect_object import DEPTH_FAR_M, DEPTH_NEAR_M, color_mask, table_pixel_mask
+from detect_object import color_mask, table_pixel_mask
 from realsense_overlay import blend_overlay
 from safety import in_camera_workspace
 
@@ -95,7 +95,7 @@ def draw_status(overlay, det, target, note: str, others=()) -> None:
         lines = [
             f"{len(others) + 1} object(s), tracking the closest",
             f"object cam X={det.cam_x:.3f} Z={det.cam_z:.3f} m  "
-            f"top {det.height_m * 1000:.0f} mm above table  {where}",
+            f"center {det.height_m * 1000:.0f} mm above table  {where}",
         ]
         if target is not None:
             lines.append(
@@ -127,15 +127,29 @@ def color_range_view(color):
     return view
 
 
+def _calibrated_depth_range() -> tuple[float, float] | None:
+    """Near and far camera depth of the four clicked corners, in meters."""
+    calib = load_calibration()
+    corners = calib.get("corners_xz") if calib else None
+    if not corners or len(corners) < 2:
+        return None
+    depths = [float(point[1]) for point in corners]
+    return min(depths), max(depths)
+
+
 def depth_range_view(color, depth, depth_scale_m):
-    """Pixels whose depth is inside the range the detector accepts."""
+    """Pixels whose depth sits between the nearest and farthest calibrated corner."""
     view = np.zeros_like(color)
+    span = _calibrated_depth_range()
     scale = depth_scale_m if depth_scale_m else 0.0
-    if scale > 0 and depth.shape[:2] == color.shape[:2]:
-        depth_m = depth.astype(np.float32) * float(scale)
-        selected = (depth_m > DEPTH_NEAR_M) & (depth_m < DEPTH_FAR_M)
-        view[selected] = 255
-    _caption(view, f"depth {DEPTH_NEAR_M:.2f}-{DEPTH_FAR_M:.0f} m")
+    if span is None or scale <= 0 or depth.shape[:2] != color.shape[:2]:
+        _caption(view, "depth range: no calibration")
+        return view
+    near_m, far_m = span
+    depth_m = depth.astype(np.float32) * float(scale)
+    selected = (depth_m >= near_m) & (depth_m <= far_m)
+    view[selected] = 255
+    _caption(view, f"depth {near_m:.2f}-{far_m:.2f} m")
     return view
 
 
