@@ -41,8 +41,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from calibration import circular_mean_hue, fit_camera_to_robot, save_calibration
 from config import HOVER_ABOVE_TABLE_M, ROBOT_IP, TABLE_Z_ROBOT
 from detect_object import deproject
-from realsense_overlay import RealSense, RsError, blend_overlay
+from realsense_overlay import RealSense, RsError
 from safety import orientation_error_rad
+from screen import draw_calibrate_view
 
 # Reject a corner if the TCP is still moving faster than this.
 STILL_SPEED_M_S = 0.002
@@ -96,9 +97,27 @@ def patch_median(image, u, v, radius, valid=None):
     return float(np.median(good))
 
 
-def on_mouse(event, x, y, flags, param):
-    if event != cv2.EVENT_LBUTTONDOWN:
+def reset_calibration() -> None:
+    """Clear the clicks so a new calibration can start."""
+    state["phase"] = "corners"
+    state["corners"] = []
+    state["colors"] = []
+    state["message"] = "Hold the TCP over corner 1, then click it"
+
+
+def advance_calibration() -> None:
+    """Move from the four corners to the object-color clicks."""
+    if state["phase"] != "corners":
         return
+    if len(state["corners"]) == 4:
+        state["phase"] = "object"
+        state["message"] = "click the object"
+    else:
+        state["message"] = "need 4 corners"
+
+
+def click_at(x: int, y: int) -> None:
+    """Record a corner or an object-color sample at a pixel on the left image."""
     color = state["color"]
     depth = state["depth"]
     if color is None or depth is None or state["intrinsics"] is None or not state["scale"]:
@@ -144,37 +163,10 @@ def on_mouse(event, x, y, flags, param):
     state["message"] = f"object samples: {len(state['colors'])} — press s to save"
 
 
-def draw(color, heat):
-    view_left = color.copy()
-    corners = state["corners"]
-    if len(corners) >= 2:
-        pts = np.array([[c["u"], c["v"]] for c in corners], dtype=np.int32)
-        closed = len(corners) == 4
-        cv2.polylines(view_left, [pts], closed, (0, 255, 0), 2)
-    for i, corner in enumerate(corners, start=1):
-        cv2.circle(view_left, (corner["u"], corner["v"]), 6, (0, 255, 0), -1)
-        cv2.putText(
-            view_left, str(i), (corner["u"] + 8, corner["v"] - 8),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA,
-        )
-    if state["phase"] == "corners":
-        done = sum(1 for c in corners if "robot" in c)
-        lines = [
-            f"TCP over corner {min(done + 1, 4)}/4, then click it",
-            "n next   u undo   q quit",
-        ]
-    else:
-        lines = [
-            "Click the object a few times",
-            "s save   u undo   q quit",
-        ]
-    if state["message"]:
-        lines.append(state["message"])
-    y = 24
-    for line in lines:
-        cv2.putText(view_left, line, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
-        y += 24
-    return np.hstack([view_left, heat])
+def on_mouse(event, x, y, flags, param):
+    if event != cv2.EVENT_LBUTTONDOWN:
+        return
+    click_at(x, y)
 
 
 def undo():
@@ -204,7 +196,7 @@ def save_from_clicks() -> bool:
         orientation_error_rad(a, b) for a in orientations for b in orientations
     )
     data = {
-        # Pixel corners: follow_object.py draws the calibrated area from these.
+        # Pixel corners: screen.py draws the calibrated area from these.
         "corners_px": [[c["u"], c["v"]] for c in corners],
         "corners_xz": corners_xz,
         "cam_xz_to_robot_R": rotation.tolist(),
@@ -251,6 +243,7 @@ def save_from_clicks() -> bool:
             "matched the corner the TCP was over, in the same order. Re-calibrate before tracking."
         )
     print(f"  hue {data['hue_center']:.1f} ± {data['hue_tol']}, S>={data['s_low']}, V>={data['v_low']}")
+    state["message"] = "saved calibration.json"
     return True
 
 
@@ -289,20 +282,17 @@ def main() -> int:
             state["depth"] = depth
             state["scale"] = cam.depth_scale_m if cam.depth_scale_m else 0.001
             state["intrinsics"] = cam.intrinsics
-            _overlay, heat = blend_overlay(color, depth, 0.45, state["scale"])
-            cv2.imshow(WIN, draw(color, heat))
+            cv2.imshow(WIN, draw_calibrate_view(
+                color, depth, state["scale"], state["corners"], state["phase"], state["message"],
+            ))
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 print("Quit without saving.")
                 break
             if key == ord("u"):
                 undo()
-            if key == ord("n") and state["phase"] == "corners":
-                if len(state["corners"]) == 4:
-                    state["phase"] = "object"
-                    state["message"] = "click the object"
-                else:
-                    state["message"] = "need 4 corners"
+            if key == ord("n"):
+                advance_calibration()
             if key == ord("s") and save_from_clicks():
                 break
     finally:

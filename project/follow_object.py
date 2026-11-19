@@ -8,7 +8,7 @@ The robot must be in Remote Control and the workspace clear.
 
 Before tracking, the TCP makes one slow straight-line move onto the hover
 plane with the fixed tool orientation; you confirm it in the terminal.
-Tracking then moves at most MAX_SPEED_M_S, in XY only.
+Tracking then moves at most the clamped speed, in X, Y, and Z.
 
 q or Ctrl+C stops the robot and disconnects.
 """
@@ -29,16 +29,22 @@ if sys.platform.startswith("linux"):
 from pathlib import Path
 
 import cv2
-import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from calibration import load_calibration, xz_inside
+from config import HOVER_ABOVE_TABLE_M, ROBOT_IP, TABLE_Z_ROBOT
 from detect_object import ClosestObjectPicker, detect_objects
-from realsense_overlay import RealSense, RsError, blend_overlay
-from config import HOVER_ABOVE_TABLE_M, MAX_SPEED_M_S, ROBOT_IP, TABLE_Z_ROBOT
+from realsense_overlay import RealSense, RsError
 from robot import Robot
-from safety import check_hover_plane, has_robot_map, in_camera_workspace, target_over_object, tcp_orientation
+from safety import (
+    check_hover_plane,
+    has_robot_map,
+    in_camera_workspace,
+    target_over_object,
+    tcp_orientation,
+    tracking_speed,
+)
+from screen import draw_follow_view
 
 robot = Robot()
 
@@ -47,93 +53,6 @@ def on_sigint(signum, frame):
     print("\nCtrl+C — stopping")
     robot.disconnect()
     raise SystemExit(0)
-
-
-AREA_COLOR = (0, 255, 255)  # BGR yellow: the calibrated pad outline
-
-
-def draw_calibrated_area(image):
-    """Outline the four pad corners clicked in calibrate.py, numbered in click order."""
-    calib = load_calibration()
-    corners = calib.get("corners_px") if calib else None
-    if not corners or len(corners) < 3:
-        return image
-    out = image.copy()
-    pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
-    cv2.polylines(out, [pts], True, AREA_COLOR, 2, cv2.LINE_AA)
-    for i, (u, v) in enumerate(corners, start=1):
-        cv2.circle(out, (int(u), int(v)), 5, AREA_COLOR, -1, cv2.LINE_AA)
-        cv2.putText(
-            out, str(i), (int(u) + 7, int(v) - 7),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.6, AREA_COLOR, 2, cv2.LINE_AA,
-        )
-    return out
-
-
-def paint_workspace(image, depth_u16, depth_scale_m, intrinsics):
-    """Tint the table pixels that lie inside the calibrated pad."""
-    if intrinsics is None or not depth_scale_m:
-        return image
-    us = np.arange(depth_u16.shape[1], dtype=np.float32)[None, :]
-    z = depth_u16.astype(np.float32) * float(depth_scale_m)
-    x = (us - intrinsics["ppx"]) / intrinsics["fx"] * z
-    inside = (depth_u16 > 0) & xz_inside(x, z)
-    out = image.copy()
-    tint = np.zeros_like(out)
-    tint[:] = (0, 180, 0)
-    blended = cv2.addWeighted(out, 0.6, tint, 0.4, 0)
-    out[inside] = blended[inside]
-    mask = (inside.astype(np.uint8)) * 255
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(out, contours, -1, (0, 255, 0), 2)
-    return out
-
-
-OTHER_COLOR = (255, 0, 255)  # BGR magenta: objects seen but not tracked
-
-
-def draw_status(overlay, det, target, note: str, others=()) -> None:
-    for other in others:
-        cv2.drawContours(overlay, [other.contour], -1, OTHER_COLOR, 1)
-        cv2.putText(
-            overlay, f"{other.distance_m:.2f} m", (int(other.u) + 8, int(other.v)),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.45, OTHER_COLOR, 1, cv2.LINE_AA,
-        )
-    if det is not None:
-        cv2.drawContours(overlay, [det.contour], -1, (0, 255, 0), 2)
-        cv2.putText(
-            overlay, f"TARGET {det.distance_m:.2f} m", (int(det.u) + 10, int(det.v) - 10),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA,
-        )
-        cv2.drawMarker(
-            overlay,
-            (int(det.u), int(det.v)),
-            (0, 255, 0),
-            cv2.MARKER_CROSS,
-            16,
-            2,
-        )
-        where = "INSIDE pad" if in_camera_workspace(det.cam_x, det.cam_z) else "OUTSIDE pad"
-        lines = [
-            f"{len(others) + 1} object(s), tracking the closest",
-            f"object cam X={det.cam_x:.3f} Z={det.cam_z:.3f} m  "
-            f"center {det.height_m * 1000:.0f} mm above table  {where}",
-        ]
-        if target is not None:
-            lines.append(
-                f"TCP  X={target[0]:.3f} Y={target[1]:.3f} Z={target[2]:.3f} m"
-            )
-        else:
-            lines.append("TCP  none (outside the pad)")
-    else:
-        lines = ["no object", "TCP  none"]
-    lines.append(note)
-    y = 24
-    for line in lines:
-        cv2.putText(
-            overlay, line, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA
-        )
-        y += 22
 
 
 def parse_args() -> argparse.Namespace:
@@ -170,7 +89,7 @@ def main() -> int:
         return 1
     print(
         f"Hover plane Z = {z_hover:.4f} m, {z_hover - TABLE_Z_ROBOT:.3f} m above the "
-        f"table (need >= {HOVER_ABOVE_TABLE_M:.2f}); tracking speed <= {MAX_SPEED_M_S * 100:.1f} cm/s"
+        f"table (need >= {HOVER_ABOVE_TABLE_M:.2f}); tracking speed <= {tracking_speed() * 100:.1f} cm/s"
     )
     # Camera and window first: if either fails (e.g. no display access under
     # sudo, which aborts the whole process inside Qt), the robot has not moved.
@@ -183,7 +102,9 @@ def main() -> int:
     win = "Follow - overlay | depth"  # ASCII only: Qt highgui fails on non-ASCII names
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     color, depth, _center_z = cam.wait_aligned()
-    cv2.imshow(win, np.hstack([color, color]))
+    cv2.imshow(win, draw_follow_view(
+        color, depth, cam.depth_scale_m, cam.intrinsics, None, None, "opening camera", [],
+    ))
     cv2.waitKey(1)
 
     try:
@@ -256,15 +177,10 @@ def main() -> int:
                         status = "outside pad — holding"
                     else:
                         status = "outside pad — holding"
-            scale = cam.depth_scale_m if cam.depth_scale_m else 0.001
-            overlay, heat = blend_overlay(color, depth, 0.45, scale)
-            if cam.intrinsics is not None:
-                overlay = paint_workspace(overlay, depth, scale, cam.intrinsics)
-                heat = paint_workspace(heat, depth, scale, cam.intrinsics)
-            overlay = draw_calibrated_area(overlay)
-            heat = draw_calibrated_area(heat)
-            others = [d for d in detections if d is not det]
-            draw_status(overlay, det, target, status, others)
+            frame = draw_follow_view(
+                color, depth, cam.depth_scale_m, cam.intrinsics,
+                det, target, status, detections,
+            )
             kind = status.split(" (")[0]
             if kind != last_status:
                 print(f"[{time.monotonic() - t_start:7.1f} s] {status}")
@@ -279,7 +195,7 @@ def main() -> int:
                 target[0] if target else None, target[1] if target else None,
                 actual[0], actual[1], actual[2], sent[0], sent[1], sent[2],
             ])
-            cv2.imshow(win, np.hstack([overlay, heat]))
+            cv2.imshow(win, frame)
             if (cv2.waitKey(1) & 0xFF) == ord("q"):
                 break
     finally:

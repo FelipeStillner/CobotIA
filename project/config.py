@@ -1,8 +1,8 @@
 """Robot command settings.
 
 The pad, the camera-to-base map, and the hover height are written by
-calibrate.py into calibration.json from the four corners and the
-X, Y, Z you type for each one. TCP Z stays on that height.
+calibrate.py into calibration.json. The tool stays at least MIN_TCP_Z
+above the base, and CLEARANCE_M above the detected object center.
 """
 
 from __future__ import annotations
@@ -17,8 +17,18 @@ import math
 # Set to None to block all motion. Re-measure if the table, the robot mount
 # or the TCP changes.
 TABLE_Z_ROBOT: float | None = -0.0018
+# The saved hover plane must sit at least this far above the table.
 HOVER_ABOVE_TABLE_M = 0.20
-# Lowest base-frame Z the TCP may be commanded to while tracking.
+
+# Runtime limits. The interface may change the values below, and safety.py
+# clamps them again before a pose is built.
+SPEED_MIN_M_S = 0.01
+SPEED_MAX_M_S = 0.10
+HEIGHT_MIN_M = 0.10
+HEIGHT_MAX_M = 0.50
+# How far above the detected object center the TCP is sent.
+CLEARANCE_M = 0.20
+# Lowest base-frame Z the TCP may be commanded to.
 MIN_TCP_Z = 0.200
 
 # The tool orientation kept while tracking is read from the robot by
@@ -30,15 +40,15 @@ MIN_TCP_Z = 0.200
 # its servo time and moves at most MAX_SPEED_M_S * dt from the actual TCP, so
 # the TCP cannot go faster than MAX_SPEED_M_S however fast the loop runs, and
 # a slow frame cannot turn into a big jump (max step MAX_SPEED_M_S * MAX_SERVO_TIME).
-MAX_SPEED_M_S = 0.2
+MAX_SPEED_M_S = 0.10
 SERVO_TIME = 1.0 / 30.0     # dt for the first command after a start or hold
 MIN_SERVO_TIME = 0.008
 MAX_SERVO_TIME = 0.2
 SERVO_LOOKAHEAD = 0.1       # range 0.03–0.2 s
 SERVO_GAIN = 200            # range 100–2000
 
-# Tracking only starts once the TCP is on the hover plane with the fixed
-# orientation; it holds instead of servoing if it drifts off either.
+# Tracking only starts once the tool orientation matches and Z is at least
+# the floor; it holds instead of servoing if it drifts off either.
 HOVER_Z_TOL_M = 0.005
 ORIENTATION_TOL_RAD = math.radians(3.0)
 

@@ -1,13 +1,13 @@
-"""RTDE link to the UR5. Sends only poses that stay on the hover plane.
+"""RTDE link to the UR5. Sends only poses at or above the floor.
 
 Motion happens in two stages:
 
 1. approach(): one slow, straight-line moveL from wherever the TCP is onto
-   the hover plane, with the fixed tool orientation. The caller confirms it.
-2. track(): servoL toward the object. Tracking refuses to run unless the TCP
-   is already on the hover plane with the fixed orientation, so servoL only
-   ever makes small XY moves. It never makes large Z or rotation moves, which
-   the controller would carry out as fast joint-space jumps.
+   the hover height, with the fixed tool orientation. The caller confirms it.
+2. track(): servoL toward the object. Tracking refuses to run unless the tool
+   orientation matches and Z is at least the floor, so servoL only ever makes
+   small steps. It never makes a large rotation, which the controller would
+   carry out as a fast joint-space jump.
 """
 
 from __future__ import annotations
@@ -16,12 +16,9 @@ import time
 
 from config import (
     APPROACH_ACCEL,
-    APPROACH_SPEED,
     HOVER_Z_TOL_M,
     MAX_SERVO_TIME,
-    MAX_SPEED_M_S,
     MIN_SERVO_TIME,
-    MIN_TCP_Z,
     ORIENTATION_TOL_RAD,
     ROBOT_IP,
     SERVO_GAIN,
@@ -30,11 +27,14 @@ from config import (
     TABLE_Z_ROBOT,
 )
 from safety import (
+    approach_speed_m_s,
     check_hover_plane,
     enforce_hover,
     limit_step,
+    min_tcp_z,
     orientation_error_rad,
     tcp_orientation,
+    tracking_speed,
 )
 
 # servoL ignores speed and acceleration; step / servo time sets the speed.
@@ -95,15 +95,19 @@ class Robot:
     def _stopped(self) -> bool:
         return self.receive.isProtectiveStopped() or self.receive.isEmergencyStopped()
 
+    def approach_z(self) -> float:
+        """Hover height, raised to the floor when the floor is higher."""
+        return max(check_hover_plane(), min_tcp_z())
+
     def approach_pose(self) -> list[float]:
-        """Current XY, hover Z, fixed orientation: where approach() goes."""
+        """Current XY, approach Z, fixed orientation: where approach() goes."""
         current = list(self.receive.getActualTCPPose())
-        return enforce_hover([current[0], current[1], check_hover_plane(), *tcp_orientation()])
+        return enforce_hover([current[0], current[1], self.approach_z(), *tcp_orientation()])
 
     def on_hover_plane(self) -> tuple[bool, str]:
-        """True when the TCP is on the hover plane with the fixed orientation."""
+        """True when the TCP is on the approach height with the fixed orientation."""
         current = list(self.receive.getActualTCPPose())
-        dz = current[2] - check_hover_plane()
+        dz = current[2] - self.approach_z()
         rot = orientation_error_rad(current[3:6], tcp_orientation())
         if abs(dz) > HOVER_Z_TOL_M:
             return False, f"TCP is {dz * 1000:+.1f} mm off the hover plane"
@@ -114,8 +118,9 @@ class Robot:
     def on_trackable(self) -> tuple[bool, str]:
         """True when tracking may servo: tool angle matches and Z is at least 200 mm."""
         current = list(self.receive.getActualTCPPose())
-        if current[2] < MIN_TCP_Z - HOVER_Z_TOL_M:
-            return False, f"TCP Z={current[2]:.3f} m is below {MIN_TCP_Z:.3f} m"
+        floor = min_tcp_z()
+        if current[2] < floor - HOVER_Z_TOL_M:
+            return False, f"TCP Z={current[2]:.3f} m is below {floor:.3f} m"
         rot = orientation_error_rad(current[3:6], tcp_orientation())
         if rot > ORIENTATION_TOL_RAD:
             return False, f"tool is {rot * 57.2958:.1f} deg off the calibrated orientation"
@@ -127,7 +132,7 @@ class Robot:
         pose = self.approach_pose()
         dz = pose[2] - current[2]
         rot = orientation_error_rad(current[3:6], pose[3:6])
-        seconds = abs(dz) / APPROACH_SPEED
+        seconds = abs(dz) / approach_speed_m_s()
         lines = [
             f"  from {[round(v, 4) for v in current]}",
             f"  to   {[round(v, 4) for v in pose]}",
@@ -136,7 +141,7 @@ class Robot:
             direction = "DOWN" if dz < 0 else "UP"
             lines.append(
                 f"  moves straight {direction} {abs(dz) * 1000:.0f} mm "
-                f"at {APPROACH_SPEED * 100:.0f} cm/s (about {seconds:.0f} s), XY unchanged"
+                f"at {approach_speed_m_s() * 100:.0f} cm/s (about {seconds:.0f} s), XY unchanged"
             )
         lines.append(
             f"  ends at Z {pose[2]:.3f} m, {pose[2] - TABLE_Z_ROBOT:.3f} m above the table"
@@ -154,7 +159,7 @@ class Robot:
             raise RuntimeError("approach pose is outside the UR safety limits")
         if not self.control.getInverseKinematicsHasSolution(pose):
             raise RuntimeError("approach pose has no IK solution")
-        if not self.control.moveL(pose, APPROACH_SPEED, APPROACH_ACCEL):
+        if not self.control.moveL(pose, approach_speed_m_s(), APPROACH_ACCEL):
             where = [round(v, 4) for v in self.receive.getActualTCPPose()]
             if self.receive.isEmergencyStopped():
                 cause = "emergency stop"
@@ -176,9 +181,9 @@ class Robot:
         return min(max(dt, MIN_SERVO_TIME), MAX_SERVO_TIME)
 
     def command_pose(self, target_xyz: list[float], current_xyz: list[float], dt: float) -> list[float]:
-        """Next servo pose: toward the target, at most MAX_SPEED_M_S * dt, Z at least 200 mm."""
-        step = MAX_SPEED_M_S * dt
-        z_goal = max(float(target_xyz[2]), MIN_TCP_Z)
+        """Next servo pose: toward the target, at the clamped speed, Z at least the floor."""
+        step = tracking_speed() * dt
+        z_goal = max(float(target_xyz[2]), min_tcp_z())
         x, y, z = limit_step(current_xyz, (target_xyz[0], target_xyz[1], z_goal), step)
         return enforce_hover([x, y, z, *tcp_orientation()])
 

@@ -8,8 +8,54 @@ from __future__ import annotations
 
 import numpy as np
 
+import config
 from calibration import load_calibration, xz_inside
-from config import HOVER_ABOVE_TABLE_M, MIN_TCP_Z, TABLE_Z_ROBOT
+from config import HOVER_ABOVE_TABLE_M, TABLE_Z_ROBOT
+
+
+def clamp_speed(speed_m_s: float) -> float:
+    """Tracking speed inside 0.01–0.10 m/s."""
+    return float(min(config.SPEED_MAX_M_S, max(config.SPEED_MIN_M_S, float(speed_m_s))))
+
+
+def clamp_height(meters: float) -> float:
+    """A height setting inside 10–50 cm."""
+    return float(min(config.HEIGHT_MAX_M, max(config.HEIGHT_MIN_M, float(meters))))
+
+
+def tracking_speed() -> float:
+    """Speed used for follow steps, after the safety clamp."""
+    return clamp_speed(config.MAX_SPEED_M_S)
+
+
+def set_tracking_speed(speed_m_s: float) -> float:
+    config.MAX_SPEED_M_S = clamp_speed(speed_m_s)
+    return config.MAX_SPEED_M_S
+
+
+def clearance_m() -> float:
+    """Meters kept above the object center, after the safety clamp."""
+    return clamp_height(config.CLEARANCE_M)
+
+
+def set_clearance(meters: float) -> float:
+    config.CLEARANCE_M = clamp_height(meters)
+    return config.CLEARANCE_M
+
+
+def min_tcp_z() -> float:
+    """Lowest base Z that may be commanded, after the safety clamp."""
+    return clamp_height(config.MIN_TCP_Z)
+
+
+def set_min_tcp_z(meters: float) -> float:
+    config.MIN_TCP_Z = clamp_height(meters)
+    return config.MIN_TCP_Z
+
+
+def approach_speed_m_s() -> float:
+    """Straight-line approach speed, never above the tracking cap."""
+    return clamp_speed(min(config.APPROACH_SPEED, config.SPEED_MAX_M_S))
 
 
 def _robot_map() -> tuple[np.ndarray, np.ndarray] | None:
@@ -71,8 +117,8 @@ def tcp_z_for_height(height_m: float) -> float:
             "TABLE_Z_ROBOT is not measured. Touch the TCP to the pad, read Z on the "
             "pendant with Feature = Base, and set it in config.py."
         )
-    z = float(TABLE_Z_ROBOT) + max(0.0, float(height_m)) + HOVER_ABOVE_TABLE_M
-    return max(z, MIN_TCP_Z)
+    z = float(TABLE_Z_ROBOT) + max(0.0, float(height_m)) + clearance_m()
+    return max(z, min_tcp_z())
 
 
 def target_over_object(cam_x: float, cam_z: float, height_m: float = 0.0) -> list[float] | None:
@@ -120,12 +166,13 @@ def check_hover_plane() -> float:
 
 
 def enforce_hover(pose: list[float]) -> list[float]:
-    """Copy of pose. Raises if Z is below MIN_TCP_Z."""
+    """Copy of pose. Raises if Z is below the clamped floor."""
     if len(pose) < 3:
         raise ValueError("pose needs at least x, y, z")
-    if pose[2] < MIN_TCP_Z - 1e-6:
+    floor = min_tcp_z()
+    if pose[2] < floor - 1e-6:
         raise RuntimeError(
-            f"Refusing Z={pose[2]:.4f} m — below the floor (Z >= {MIN_TCP_Z:.4f} m)"
+            f"Refusing Z={pose[2]:.4f} m — below the floor (Z >= {floor:.4f} m)"
         )
     return list(pose)
 
