@@ -116,7 +116,8 @@ def draw_status(overlay, det, target, note: str, others=()) -> None:
         where = "INSIDE pad" if in_camera_workspace(det.cam_x, det.cam_z) else "OUTSIDE pad"
         lines = [
             f"{len(others) + 1} object(s), tracking the closest",
-            f"object cam X={det.cam_x:.3f} Z={det.cam_z:.3f} m  {where}",
+            f"object cam X={det.cam_x:.3f} Z={det.cam_z:.3f} m  "
+            f"center {det.height_m * 1000:.0f} mm above table  {where}",
         ]
         if target is not None:
             lines.append(
@@ -238,7 +239,9 @@ def main() -> int:
                 det = picker.pick(detections)
                 if det is not None:
                     inside = in_camera_workspace(det.cam_x, det.cam_z)
-                    target = target_over_object(det.cam_x, det.cam_z) if inside else None
+                    target = (
+                        target_over_object(det.cam_x, det.cam_z, det.height_m) if inside else None
+                    )
                     if target is not None:
                         holding = False
                         try:

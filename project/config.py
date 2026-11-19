@@ -18,6 +18,8 @@ import math
 # or the TCP changes.
 TABLE_Z_ROBOT: float | None = -0.0018
 HOVER_ABOVE_TABLE_M = 0.20
+# Lowest base-frame Z the TCP may be commanded to while tracking.
+MIN_TCP_Z = 0.200
 
 # The tool orientation kept while tracking is read from the robot by
 # calibrate.py and saved as "tcp_orientation" in calibration.json.

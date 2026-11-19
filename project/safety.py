@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 from calibration import load_calibration, xz_inside
-from config import HOVER_ABOVE_TABLE_M, TABLE_Z_ROBOT
+from config import HOVER_ABOVE_TABLE_M, MIN_TCP_Z, TABLE_Z_ROBOT
 
 
 def _robot_map() -> tuple[np.ndarray, np.ndarray] | None:
@@ -61,23 +61,35 @@ def camera_xz_to_robot_xy(cam_x: float, cam_z: float) -> tuple[float, float] | N
     return float(v[0]), float(v[1])
 
 
-def target_over_object(cam_x: float, cam_z: float) -> list[float] | None:
-    """Robot [x, y, z] above the object, or None if it cannot be commanded.
+def tcp_z_for_height(height_m: float) -> float:
+    """Base Z 20 cm above the object center, never below MIN_TCP_Z.
 
-    Z is the hover plane from the four typed corner heights. The object's
-    own height is not used, so the TCP cannot be pulled down onto the table.
+    height_m is how far the detected center sits above the table.
+    """
+    if TABLE_Z_ROBOT is None:
+        raise RuntimeError(
+            "TABLE_Z_ROBOT is not measured. Touch the TCP to the pad, read Z on the "
+            "pendant with Feature = Base, and set it in config.py."
+        )
+    z = float(TABLE_Z_ROBOT) + max(0.0, float(height_m)) + HOVER_ABOVE_TABLE_M
+    return max(z, MIN_TCP_Z)
+
+
+def target_over_object(cam_x: float, cam_z: float, height_m: float = 0.0) -> list[float] | None:
+    """Robot [x, y, z] 20 cm above the object center, or None outside the pad.
+
+    Z follows the center's height above the table and never goes below MIN_TCP_Z.
     """
     if not in_camera_workspace(cam_x, cam_z):
         return None
     xy = camera_xz_to_robot_xy(cam_x, cam_z)
-    z = hover_z()
-    if xy is None or z is None:
+    if xy is None or hover_z() is None:
         return None
-    return [xy[0], xy[1], z]
+    return [xy[0], xy[1], tcp_z_for_height(height_m)]
 
 
 def table_floor_z() -> float:
-    """Lowest Z the TCP may ever be commanded to: table + hover height."""
+    """Table plus 20 cm. The saved hover plane must clear this before the approach."""
     if TABLE_Z_ROBOT is None:
         raise RuntimeError(
             "TABLE_Z_ROBOT is not measured. Touch the TCP to the pad, read Z on the "
@@ -108,17 +120,12 @@ def check_hover_plane() -> float:
 
 
 def enforce_hover(pose: list[float]) -> list[float]:
-    """Copy of pose, checked to be on or above the hover plane.
-
-    Raises if a caller tries to command anything below the hover plane or
-    below table + HOVER_ABOVE_TABLE_M.
-    """
+    """Copy of pose. Raises if Z is below MIN_TCP_Z."""
     if len(pose) < 3:
         raise ValueError("pose needs at least x, y, z")
-    floor = max(check_hover_plane(), table_floor_z())
-    if pose[2] < floor - 1e-6:
+    if pose[2] < MIN_TCP_Z - 1e-6:
         raise RuntimeError(
-            f"Refusing Z={pose[2]:.4f} m — below the hover floor (Z >= {floor:.4f} m)"
+            f"Refusing Z={pose[2]:.4f} m — below the floor (Z >= {MIN_TCP_Z:.4f} m)"
         )
     return list(pose)
 

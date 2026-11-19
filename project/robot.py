@@ -21,6 +21,7 @@ from config import (
     MAX_SERVO_TIME,
     MAX_SPEED_M_S,
     MIN_SERVO_TIME,
+    MIN_TCP_Z,
     ORIENTATION_TOL_RAD,
     ROBOT_IP,
     SERVO_GAIN,
@@ -110,6 +111,16 @@ class Robot:
             return False, f"tool is {rot * 57.2958:.1f} deg off the calibrated orientation"
         return True, "on hover plane"
 
+    def on_trackable(self) -> tuple[bool, str]:
+        """True when tracking may servo: tool angle matches and Z is at least 200 mm."""
+        current = list(self.receive.getActualTCPPose())
+        if current[2] < MIN_TCP_Z - HOVER_Z_TOL_M:
+            return False, f"TCP Z={current[2]:.3f} m is below {MIN_TCP_Z:.3f} m"
+        rot = orientation_error_rad(current[3:6], tcp_orientation())
+        if rot > ORIENTATION_TOL_RAD:
+            return False, f"tool is {rot * 57.2958:.1f} deg off the calibrated orientation"
+        return True, "tracking allowed"
+
     def describe_approach(self) -> list[str]:
         """The approach move in words, for the operator to confirm."""
         current = list(self.receive.getActualTCPPose())
@@ -165,9 +176,10 @@ class Robot:
         return min(max(dt, MIN_SERVO_TIME), MAX_SERVO_TIME)
 
     def command_pose(self, target_xyz: list[float], current_xyz: list[float], dt: float) -> list[float]:
-        """Next servo pose: on the hover plane, at most MAX_SPEED_M_S * dt from current."""
+        """Next servo pose: toward the target, at most MAX_SPEED_M_S * dt, Z at least 200 mm."""
         step = MAX_SPEED_M_S * dt
-        x, y, z = limit_step(current_xyz, (target_xyz[0], target_xyz[1], check_hover_plane()), step)
+        z_goal = max(float(target_xyz[2]), MIN_TCP_Z)
+        x, y, z = limit_step(current_xyz, (target_xyz[0], target_xyz[1], z_goal), step)
         return enforce_hover([x, y, z, *tcp_orientation()])
 
     def track(self, target_xyz: list[float]) -> str:
@@ -179,9 +191,8 @@ class Robot:
             self.ready = False
             return "robot stopped — not moving"
 
-        ok, why = self.on_hover_plane()
+        ok, why = self.on_trackable()
         if not ok:
-            # Never let servoL correct a Z or orientation error: hold instead.
             self.ready = False
             self.hold()
             return f"{why} — held"

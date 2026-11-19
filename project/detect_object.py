@@ -23,6 +23,7 @@ class Detection:
     cam_z: float
     contour: np.ndarray
     distance_m: float   # straight-line distance from the camera lens
+    height_m: float     # center's height above the table, meters
 
 
 def deproject(u: float, v: float, depth_m: float, fx: float, fy: float, ppx: float, ppy: float):
@@ -51,6 +52,40 @@ def color_mask(color_bgr: np.ndarray, calib: dict) -> np.ndarray:
     )
 
 
+def fit_table_plane(depth_m, valid, on_pad, object_u8, intrinsics):
+    """cam_y = a*cam_x + b*cam_z + c for pad pixels that are not the object.
+
+    Camera Y points down, so a higher point has a smaller cam_y.
+    Returns None when the table is not a clear plane.
+    """
+    table = valid & on_pad & (object_u8 == 0)
+    idx = np.flatnonzero(table)
+    if idx.size < 200:
+        return None
+    step = max(1, idx.size // 2500)
+    idx = idx[::step]
+    width = depth_m.shape[1]
+    rows, cols = np.divmod(idx, width)
+    z = depth_m[rows, cols].astype(np.float64)
+    fx = float(intrinsics["fx"])
+    fy = float(intrinsics["fy"])
+    cam_x = (cols.astype(np.float64) - float(intrinsics["ppx"])) / fx * z
+    cam_y = (rows.astype(np.float64) - float(intrinsics["ppy"])) / fy * z
+    design = np.column_stack([cam_x, z, np.ones(cam_x.shape[0])])
+    coeff, *_ = np.linalg.lstsq(design, cam_y, rcond=None)
+    if float(np.median(np.abs(design @ coeff - cam_y))) > 0.02:
+        return None
+    return coeff
+
+
+def height_above_table(cam_x: float, cam_y: float, cam_z: float, plane) -> float:
+    """Meters the point sits above the fitted table. Zero when the plane is missing."""
+    if plane is None:
+        return 0.0
+    table_y = float(plane[0]) * cam_x + float(plane[1]) * cam_z + float(plane[2])
+    return float(np.clip(table_y - cam_y, 0.0, 0.50))
+
+
 def detect_objects(
     depth_u16: np.ndarray,
     depth_scale_m: float,
@@ -76,6 +111,7 @@ def detect_objects(
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    plane = fit_table_plane(depth_m, valid, on_pad, mask, intrinsics)
     found = []
     inside = np.zeros(depth_m.shape, dtype=np.uint8)
     for contour in contours:
@@ -97,7 +133,8 @@ def detect_objects(
             u, v, z, intrinsics["fx"], intrinsics["fy"], intrinsics["ppx"], intrinsics["ppy"]
         )
         distance = float(np.sqrt(cam_x**2 + cam_y**2 + cam_z**2))
-        found.append(Detection(u, v, cam_x, cam_z, contour, distance))
+        height = height_above_table(cam_x, cam_y, cam_z, plane)
+        found.append(Detection(u, v, cam_x, cam_z, contour, distance, height))
     found.sort(key=lambda d: d.distance_m)
     return found
 
