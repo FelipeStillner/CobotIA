@@ -78,6 +78,7 @@ class App:
         self.cam = None
         self.cam_error = ""
         self.photo = None
+        self.view_geom = None  # source w,h and displayed w,h of the picture
         self.phase = "idle"  # idle, calibrate, confirm, approaching, tracking
         self.holding = False
         self.picker = ClosestObjectPicker()
@@ -163,7 +164,7 @@ class App:
         ).pack(anchor=tk.W, pady=(4, 0))
 
         self.speed_value = self._caption(content, "Speed", "0.10 m/s", top=18)
-        self.speed = ttk.Scale(content, from_=0.01, to=0.10, command=self.on_speed)
+        self.speed = ttk.Scale(content, from_=0.03, to=0.30, command=self.on_speed)
         self.speed.pack(fill=tk.X, pady=(2, 0))
         self.clearance_value = self._caption(content, "Above the object", "20 cm")
         self.clearance = ttk.Scale(content, from_=10, to=50, command=self.on_clearance)
@@ -319,6 +320,7 @@ class App:
             self.status.set(f"Robot connection failed: {exc}")
             return
         cal_state["receive"] = receive
+        cal_state["robot_ip"] = self.ip()
         reset_calibration()
         self.phase = "calibrate"
         self.confirm_button.configure(state=tk.DISABLED)
@@ -397,18 +399,17 @@ class App:
         self.status.set("Stopped. The camera stays open.")
 
     def on_click(self, event) -> None:
-        if self.phase != "calibrate" or self.photo is None:
+        if self.phase != "calibrate" or self.view_geom is None:
             return
-        frame = self.latest_frame()
-        if frame is None:
-            return
-        color = frame[0]
-        view = self.photo
-        # draw_*_view stacks color | depth. Map the click back onto that image.
-        full_w = color.shape[1] * 2
-        full_h = color.shape[0]
-        src_x = int(event.x * full_w / max(view.width(), 1))
-        src_y = int(event.y * full_h / max(view.height(), 1))
+        src_w, src_h, disp_w, disp_h = self.view_geom
+        # event.x/y are in the label's coordinates. That matches the picture
+        # once the label has been given its size; until then use the picture size.
+        widget_w = self.image_label.winfo_width()
+        widget_h = self.image_label.winfo_height()
+        if widget_w <= 1 or widget_h <= 1:
+            widget_w, widget_h = disp_w, disp_h
+        src_x = int(event.x * src_w / max(widget_w, 1))
+        src_y = int(event.y * src_h / max(widget_h, 1))
         click_at(src_x, src_y)
         self.status.set(cal_state.get("message") or "")
 
@@ -426,7 +427,8 @@ class App:
 
     def show(self, bgr) -> None:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        height, width = rgb.shape[:2]
+        src_h, src_w = rgb.shape[:2]
+        height, width = src_h, src_w
         box_w = self.stage.winfo_width()
         box_h = self.stage.winfo_height()
         if box_w <= 1:
@@ -447,6 +449,7 @@ class App:
         header = f"P6 {width} {height} 255\n".encode()
         photo = tk.PhotoImage(data=header + rgb.tobytes(), format="PPM")
         self.photo = photo
+        self.view_geom = (src_w, src_h, width, height)
         self.image_label.configure(image=photo, text="")
 
     def draw(self) -> None:

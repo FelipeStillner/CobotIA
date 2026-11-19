@@ -62,9 +62,10 @@ class Robot:
             "Connected. TCP",
             [round(v, 4) for v in pose],
         )
+        self.ensure_control()
 
     def disconnect(self) -> None:
-        if self.control is not None:
+        if self.control is not None and self.control.isProgramRunning():
             for stop in (lambda: self.control.servoStop(), lambda: self.control.stopL(0.5)):
                 try:
                     stop()
@@ -82,12 +83,56 @@ class Robot:
         self.receive = None
         self.ready = False
 
+    def _in_remote_control(self) -> bool | None:
+        """True, False, or None when the dashboard cannot answer."""
+        try:
+            from dashboard_client import DashboardClient
+
+            dash = DashboardClient(self.ip)
+            dash.connect(2000)
+            try:
+                return bool(dash.isInRemoteControl())
+            finally:
+                dash.disconnect()
+        except Exception:
+            return None
+
+    def ensure_control(self) -> None:
+        """Start the UR control script. It only runs in Remote Control.
+
+        Without that script, the controller answers the safety query with
+        false, which is not the same thing as a pose outside the safety planes.
+        """
+        if self.control is None or not self.control.isConnected():
+            raise RuntimeError("Not connected to the robot")
+        if self.control.isProgramRunning():
+            return
+        if self._in_remote_control() is False:
+            raise RuntimeError(
+                "The robot is in Local control, so it will not run the approach. "
+                "In PolyScope, open the mode menu at the top and choose Remote Control."
+            )
+        if not self.control.reuploadScript():
+            raise RuntimeError(
+                "The UR control script did not start. Set the robot to Remote Control and try again."
+            )
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if self.control.isProgramRunning():
+                return
+            time.sleep(0.05)
+        raise RuntimeError(
+            "The UR control script did not start. Set the robot to Remote Control and try again."
+        )
+
     def hold(self) -> None:
         """Stop a servo stream and leave the arm where it is."""
         self._last_servo = None
         if self.control is None:
             return
         try:
+            if not self.control.isProgramRunning():
+                return
             self.control.servoStop()
         except Exception:
             pass
@@ -154,9 +199,13 @@ class Robot:
         """Slow straight-line moveL onto the hover plane. Raises if refused."""
         if self._stopped():
             raise RuntimeError("robot is protective- or emergency-stopped")
+        self.ensure_control()
         pose = self.approach_pose()
         if not self.control.isPoseWithinSafetyLimits(pose):
-            raise RuntimeError("approach pose is outside the UR safety limits")
+            where = [round(v, 4) for v in pose]
+            raise RuntimeError(
+                f"approach pose {where} is outside the UR safety limits"
+            )
         if not self.control.getInverseKinematicsHasSolution(pose):
             raise RuntimeError("approach pose has no IK solution")
         if not self.control.moveL(pose, approach_speed_m_s(), APPROACH_ACCEL):
@@ -195,6 +244,11 @@ class Robot:
         if self._stopped():
             self.ready = False
             return "robot stopped — not moving"
+        try:
+            self.ensure_control()
+        except RuntimeError as exc:
+            self.ready = False
+            return str(exc)
 
         ok, why = self.on_trackable()
         if not ok:

@@ -22,8 +22,8 @@ HOVER_ABOVE_TABLE_M = 0.20
 
 # Runtime limits. The interface may change the values below, and safety.py
 # clamps them again before a pose is built.
-SPEED_MIN_M_S = 0.01
-SPEED_MAX_M_S = 0.10
+SPEED_MIN_M_S = 0.03
+SPEED_MAX_M_S = 0.30
 HEIGHT_MIN_M = 0.10
 HEIGHT_MAX_M = 0.50
 # How far above the detected object center the TCP is sent.

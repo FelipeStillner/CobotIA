@@ -23,7 +23,7 @@ class Detection:
     cam_z: float
     contour: np.ndarray
     distance_m: float   # straight-line distance from the camera lens
-    height_m: float     # center's height above the table, meters
+    height_m: float     # top of the object above the table, meters
 
 
 def deproject(u: float, v: float, depth_m: float, fx: float, fy: float, ppx: float, ppy: float):
@@ -52,30 +52,71 @@ def color_mask(color_bgr: np.ndarray, calib: dict) -> np.ndarray:
     )
 
 
-def fit_table_plane(depth_m, valid, on_pad, object_u8, intrinsics):
-    """cam_y = a*cam_x + b*cam_z + c for pad pixels that are not the object.
-
-    Camera Y points down, so a higher point has a smaller cam_y.
-    Returns None when the table is not a clear plane.
-    """
-    table = valid & on_pad & (object_u8 == 0)
-    idx = np.flatnonzero(table)
-    if idx.size < 200:
-        return None
-    step = max(1, idx.size // 2500)
-    idx = idx[::step]
-    width = depth_m.shape[1]
-    rows, cols = np.divmod(idx, width)
+def _cam_points(rows, cols, depth_m, intrinsics):
+    """Camera X, Y, Z for image pixels. Y points down, so higher is a smaller Y."""
     z = depth_m[rows, cols].astype(np.float64)
     fx = float(intrinsics["fx"])
     fy = float(intrinsics["fy"])
     cam_x = (cols.astype(np.float64) - float(intrinsics["ppx"])) / fx * z
     cam_y = (rows.astype(np.float64) - float(intrinsics["ppy"])) / fy * z
-    design = np.column_stack([cam_x, z, np.ones(cam_x.shape[0])])
+    return cam_x, cam_y, z
+
+
+def _plane_from_points(cam_x, cam_y, cam_z):
+    design = np.column_stack([cam_x, cam_z, np.ones(cam_x.shape[0])])
     coeff, *_ = np.linalg.lstsq(design, cam_y, rcond=None)
-    if float(np.median(np.abs(design @ coeff - cam_y))) > 0.02:
+    residual = np.abs(design @ coeff - cam_y)
+    return coeff, residual
+
+
+def fit_table_plane(depth_m, valid, on_pad, intrinsics):
+    """cam_y = a*cam_x + b*cam_z + c for the pad.
+
+    Camera Y points down, so a higher point has a smaller cam_y.
+    Two fits drop pixels more than 1.5 cm above the plane, so the object
+    itself does not tilt the table. Returns None when the pad is not a
+    clear plane.
+    """
+    table = valid & on_pad
+    idx = np.flatnonzero(table)
+    if idx.size < 200:
+        return None
+    step = max(1, idx.size // 2500)
+    idx = idx[::step]
+    rows, cols = np.divmod(idx, depth_m.shape[1])
+    cam_x, cam_y, cam_z = _cam_points(rows, cols, depth_m, intrinsics)
+    coeff, _residual = _plane_from_points(cam_x, cam_y, cam_z)
+    keep = np.ones(cam_x.shape[0], dtype=bool)
+    for _ in range(2):
+        height = coeff[0] * cam_x + coeff[1] * cam_z + coeff[2] - cam_y
+        keep = (height < 0.015) & (height > -0.04) & np.isfinite(height)
+        if int(keep.sum()) < 80:
+            return None
+        coeff, residual = _plane_from_points(cam_x[keep], cam_y[keep], cam_z[keep])
+    if float(np.median(residual)) > 0.02:
         return None
     return coeff
+
+
+def _above_table(depth_m, selected, intrinsics, plane, min_height=0.008):
+    """Pixels of `selected` that stand at least min_height above the table.
+
+    None when too few pixels clear the table, so the caller keeps the
+    color region (a flat object has no raised pixels).
+    """
+    if plane is None:
+        return None
+    rows, cols = np.nonzero(selected)
+    if rows.size == 0:
+        return None
+    cam_x, cam_y, cam_z = _cam_points(rows, cols, depth_m, intrinsics)
+    height = float(plane[0]) * cam_x + float(plane[1]) * cam_z + float(plane[2]) - cam_y
+    keep = np.isfinite(height) & (height > min_height)
+    if int(keep.sum()) < 30:
+        return None
+    out = np.zeros(selected.shape, dtype=bool)
+    out[rows[keep], cols[keep]] = True
+    return out
 
 
 def height_above_table(cam_x: float, cam_y: float, cam_z: float, plane) -> float:
@@ -84,6 +125,32 @@ def height_above_table(cam_x: float, cam_y: float, cam_z: float, plane) -> float
         return 0.0
     table_y = float(plane[0]) * cam_x + float(plane[1]) * cam_z + float(plane[2])
     return float(np.clip(table_y - cam_y, 0.0, 0.50))
+
+
+def height_of_mask(depth_m, selected, intrinsics, plane) -> float:
+    """Height of the top of a region above the table plane.
+
+    Each pixel is measured with its own depth. The result is the median of
+    the upper quarter, so the table showing through the mask does not pull
+    the height down to zero, and a few wild depth pixels do not set it.
+    """
+    if plane is None:
+        return 0.0
+    rows, cols = np.nonzero(selected)
+    if rows.size < 20:
+        return 0.0
+    cam_x, cam_y, cam_z = _cam_points(rows, cols, depth_m, intrinsics)
+    height = float(plane[0]) * cam_x + float(plane[1]) * cam_z + float(plane[2]) - cam_y
+    height = height[np.isfinite(height)]
+    if height.size < 20:
+        return 0.0
+    # Pixels on the object stand above the table. The table seen through the
+    # mask stays near zero and must not be part of the average.
+    above = height[height > 0.008]
+    if above.size >= 15:
+        band = above[above >= np.percentile(above, 80)]
+        return float(np.clip(np.median(band), 0.0, 0.50))
+    return float(np.clip(np.median(height), 0.0, 0.50))
 
 
 def detect_objects(
@@ -105,13 +172,19 @@ def detect_objects(
         return []
     on_pad = workspace_mask(depth_u16, depth_scale_m, intrinsics)
     foreground = valid & on_pad & color_mask(color_bgr, calib)
+    # The color sample often covers the table as well as the object. The
+    # table is flat, so the pixels that stand above it are the object, and
+    # those are what X and Y follow.
+    plane = fit_table_plane(depth_m, valid, on_pad, intrinsics)
+    raised = _above_table(depth_m, foreground, intrinsics, plane)
+    if raised is not None:
+        foreground = raised
     mask = (foreground.astype(np.uint8)) * 255
     kernel = np.ones((5, 5), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    plane = fit_table_plane(depth_m, valid, on_pad, mask, intrinsics)
     found = []
     inside = np.zeros(depth_m.shape, dtype=np.uint8)
     for contour in contours:
@@ -125,15 +198,16 @@ def detect_objects(
 
         inside[:] = 0
         cv2.drawContours(inside, [contour], -1, 1, thickness=-1)
-        samples = depth_m[(inside == 1) & valid]
-        if samples.size == 0:
+        samples = (inside == 1) & valid
+        if int(samples.sum()) < 20:
             continue
-        z = float(np.median(samples))
-        cam_x, cam_y, cam_z = deproject(
-            u, v, z, intrinsics["fx"], intrinsics["fy"], intrinsics["ppx"], intrinsics["ppy"]
-        )
+        rows, cols = np.nonzero(samples)
+        cam_xs, cam_ys, cam_zs = _cam_points(rows, cols, depth_m, intrinsics)
+        cam_x = float(np.median(cam_xs))
+        cam_y = float(np.median(cam_ys))
+        cam_z = float(np.median(cam_zs))
         distance = float(np.sqrt(cam_x**2 + cam_y**2 + cam_z**2))
-        height = height_above_table(cam_x, cam_y, cam_z, plane)
+        height = height_of_mask(depth_m, samples, intrinsics, plane)
         found.append(Detection(u, v, cam_x, cam_z, contour, distance, height))
     found.sort(key=lambda d: d.distance_m)
     return found

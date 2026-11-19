@@ -10,9 +10,11 @@ Feature setting ("Vue", "Base", ...) does not matter.
 
 1. Jog the TCP to the hover height (at least HOVER_ABOVE_TABLE_M above the pad) over corner 1,
    with the tool pointing down the way it should track. Let it stop.
-2. Click corner 1 on the left image. The robot pose is recorded.
-3. Repeat for the other 3 corners, in order around the edge, keeping the
-   same height and tool orientation.
+2. Click corner 1 on the left image. The line shows where the click landed
+   in the camera, and the tool X, Y read from the robot.
+3. Jog the tool to the next corner and let it stop. Repeat around the edge,
+   at the same height and tool orientation. The tool X, Y stay the same
+   until the tool itself moves.
 4. Press n.
 5. Click the object a few times (the color is sampled around each click).
 6. Press s to save.
@@ -49,6 +51,10 @@ from screen import draw_calibrate_view
 STILL_SPEED_M_S = 0.002
 # Warn when the four corner orientations differ by more than this.
 ORIENTATION_SPREAD_WARN_RAD = np.radians(5.0)
+# Two corners closer than this are the same place. The map would then send
+# every object to one robot X, Y.
+MIN_CORNER_SEPARATION_M = 0.02
+MIN_PAD_SPAN_M = 0.05
 
 WIN = "Calibrate - click the left image"  # ASCII only: Qt highgui fails on non-ASCII names
 state = {
@@ -61,6 +67,7 @@ state = {
     "intrinsics": None,
     "message": "",
     "receive": None,
+    "robot_ip": "",
 }
 
 
@@ -116,6 +123,23 @@ def advance_calibration() -> None:
         state["message"] = "need 4 corners"
 
 
+def _clicked_camera_xz(x: int, y: int) -> tuple[float, float] | None:
+    """Camera X, Z (meters) of one click, from the depth at that pixel."""
+    raw = patch_median(state["depth"], x, y, 4, valid=state["depth"] > 0)
+    if raw is None:
+        return None
+    intr = state["intrinsics"]
+    depth_m = raw * state["scale"]
+    cam_x, _cam_y, cam_z = deproject(
+        x, y, depth_m, intr["fx"], intr["fy"], intr["ppx"], intr["ppy"]
+    )
+    return cam_x, cam_z
+
+
+def _separated(a, b, tol: float) -> bool:
+    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 >= tol * tol
+
+
 def click_at(x: int, y: int) -> None:
     """Record a corner or an object-color sample at a pixel on the left image."""
     color = state["color"]
@@ -123,25 +147,43 @@ def click_at(x: int, y: int) -> None:
     if color is None or depth is None or state["intrinsics"] is None or not state["scale"]:
         state["message"] = "camera not ready"
         return
-    if x >= color.shape[1]:
+    if x < 0 or y < 0 or x >= color.shape[1] or y >= color.shape[0]:
         state["message"] = "click the left image"
         return
-    intr = state["intrinsics"]
+    point = _clicked_camera_xz(x, y)
+    if point is None:
+        state["message"] = "no depth there — click the table again"
+        return
+    cam_x, cam_z = point
+    seen = f"camera X {cam_x * 1000:.0f} Z {cam_z * 1000:.0f} mm"
     if state["phase"] == "corners":
         if len(state["corners"]) >= 4:
             state["message"] = "4 corners already — press n"
             return
-        raw = patch_median(depth, x, y, 4, valid=depth > 0)
-        if raw is None:
-            state["message"] = "no depth there — click the table again"
-            return
+        for i, earlier in enumerate(state["corners"], start=1):
+            if not _separated((cam_x, cam_z), (earlier["x"], earlier["z"]), MIN_CORNER_SEPARATION_M):
+                state["message"] = (
+                    f"Same place as corner {i} ({seen}). Click the next corner of the pad."
+                )
+                print(state["message"])
+                return
         pose, why = read_robot_pose()
         if pose is None:
             state["message"] = why
             print(why)
             return
-        depth_m = raw * state["scale"]
-        cam_x, _cam_y, cam_z = deproject(x, y, depth_m, intr["fx"], intr["fy"], intr["ppx"], intr["ppy"])
+        tool = pose[:2]
+        for i, earlier in enumerate(state["corners"], start=1):
+            if not _separated(tool, earlier["robot"][:2], MIN_CORNER_SEPARATION_M):
+                mm = [round(v * 1000.0, 1) for v in pose[:3]]
+                where = state.get("robot_ip") or "the connected robot"
+                state["message"] = (
+                    f"Tool still at X {mm[0]:.0f} Y {mm[1]:.0f} mm on {where}. "
+                    "Jog the tool to this corner, let it stop, then click."
+                )
+                print(state["message"])
+                print(f"           click measured {seen}")
+                return
         state["corners"].append(
             {"u": x, "v": y, "x": cam_x, "z": cam_z, "robot": pose[:3], "orientation": pose[3:]}
         )
@@ -150,9 +192,15 @@ def click_at(x: int, y: int) -> None:
         height = ""
         if TABLE_Z_ROBOT is not None:
             height = f", {(pose[2] - TABLE_Z_ROBOT) * 1000:.0f} mm above the table"
-        print(f"corner {n}/4: robot X {mm[0]} Y {mm[1]} Z {mm[2]} mm (Base){height}")
+        print(
+            f"corner {n}/4: {seen}, pixel ({x}, {y}) | "
+            f"tool X {mm[0]} Y {mm[1]} Z {mm[2]} mm (Base){height}"
+        )
         print(f"           orientation {[round(v, 4) for v in pose[3:]]} rad")
-        state["message"] = f"corner {n}/4 recorded" + (" - press n" if n == 4 else "")
+        state["message"] = (
+            f"corner {n}/4  {seen}   tool X {mm[0]:.0f} Y {mm[1]:.0f} mm"
+            + (" — press n" if n == 4 else "")
+        )
         return
 
     hsv = cv2.cvtColor(color, cv2.COLOR_BGR2HSV)
@@ -160,7 +208,7 @@ def click_at(x: int, y: int) -> None:
     if sample is None:
         return
     state["colors"].append([float(sample[0]), float(sample[1]), float(sample[2])])
-    state["message"] = f"object samples: {len(state['colors'])} — press s to save"
+    state["message"] = f"object samples: {len(state['colors'])}  {seen} — press s to save"
 
 
 def on_mouse(event, x, y, flags, param):
@@ -190,6 +238,24 @@ def save_from_clicks() -> bool:
     vals = [c[2] for c in state["colors"]]
     corners_xz = [[c["x"], c["z"]] for c in corners]
     corners_robot = [c["robot"] for c in corners]
+    cam_span_x = max(p[0] for p in corners_xz) - min(p[0] for p in corners_xz)
+    cam_span_z = max(p[1] for p in corners_xz) - min(p[1] for p in corners_xz)
+    tool_span_x = max(p[0] for p in corners_robot) - min(p[0] for p in corners_robot)
+    tool_span_y = max(p[1] for p in corners_robot) - min(p[1] for p in corners_robot)
+    if cam_span_x < MIN_PAD_SPAN_M or cam_span_z < MIN_PAD_SPAN_M:
+        state["message"] = (
+            "The four clicks landed on the same spot in the camera. "
+            "Click the four corners of the pad."
+        )
+        print(state["message"])
+        return False
+    if tool_span_x < MIN_PAD_SPAN_M or tool_span_y < MIN_PAD_SPAN_M:
+        state["message"] = (
+            "The tool stayed in one place, so every object would get the same X and Y. "
+            "Jog the tool to each corner and calibrate again."
+        )
+        print(state["message"])
+        return False
     rotation, translation, error_m, hover = fit_camera_to_robot(corners_xz, corners_robot)
     orientations = [c["orientation"] for c in corners]
     spread = max(
@@ -254,6 +320,7 @@ def main() -> int:
 
     from rtde_receive import RTDEReceiveInterface
 
+    state["robot_ip"] = args.ip
     print(f"Connecting to the robot at {args.ip} (read-only, rtde_receive) ...")
     try:
         state["receive"] = RTDEReceiveInterface(args.ip)

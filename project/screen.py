@@ -98,7 +98,7 @@ def draw_status(overlay, det, target, note: str, others=()) -> None:
         lines = [
             f"{len(others) + 1} object(s), tracking the closest",
             f"object cam X={det.cam_x:.3f} Z={det.cam_z:.3f} m  "
-            f"center {det.height_m * 1000:.0f} mm above table  {where}",
+            f"top {det.height_m * 1000:.0f} mm above table  {where}",
         ]
         if target is not None:
             lines.append(

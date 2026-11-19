@@ -14,7 +14,7 @@ from config import HOVER_ABOVE_TABLE_M, TABLE_Z_ROBOT
 
 
 def clamp_speed(speed_m_s: float) -> float:
-    """Tracking speed inside 0.01–0.10 m/s."""
+    """Tracking speed inside 0.03–0.30 m/s."""
     return float(min(config.SPEED_MAX_M_S, max(config.SPEED_MIN_M_S, float(speed_m_s))))
 
 
@@ -108,9 +108,9 @@ def camera_xz_to_robot_xy(cam_x: float, cam_z: float) -> tuple[float, float] | N
 
 
 def tcp_z_for_height(height_m: float) -> float:
-    """Base Z 20 cm above the object center, never below MIN_TCP_Z.
+    """Base Z one clearance above the top of the object, never below the floor.
 
-    height_m is how far the detected center sits above the table.
+    height_m is how far the top of the object sits above the table.
     """
     if TABLE_Z_ROBOT is None:
         raise RuntimeError(
@@ -122,9 +122,9 @@ def tcp_z_for_height(height_m: float) -> float:
 
 
 def target_over_object(cam_x: float, cam_z: float, height_m: float = 0.0) -> list[float] | None:
-    """Robot [x, y, z] 20 cm above the object center, or None outside the pad.
+    """Robot [x, y, z] one clearance above the top of the object, or None outside the pad.
 
-    Z follows the center's height above the table and never goes below MIN_TCP_Z.
+    Z follows the object's height above the table and never goes below the floor.
     """
     if not in_camera_workspace(cam_x, cam_z):
         return None
