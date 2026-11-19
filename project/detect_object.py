@@ -14,6 +14,10 @@ import numpy as np
 from calibration import load_calibration, xz_inside
 from config import MIN_OBJECT_AREA_PX, OBJECT_MATCH_PX, OBJECT_SWITCH_MARGIN_M
 
+# Depth the detector accepts. The interface draws exactly this set of pixels.
+DEPTH_NEAR_M = 0.15
+DEPTH_FAR_M = 2.0
+
 
 @dataclass
 class Detection:
@@ -31,6 +35,26 @@ def deproject(u: float, v: float, depth_m: float, fx: float, fy: float, ppx: flo
     x = (float(u) - ppx) / fx * z
     y = (float(v) - ppy) / fy * z
     return x, y, z
+
+
+def table_pixel_mask(shape, calib, margin_px: int = 15) -> np.ndarray:
+    """The clicked table corners, grown a little so the object on the edge is included.
+
+    This is the table in the image. It does not include the robot standing
+    above that rectangle.
+    """
+    mask = np.zeros(shape[:2], np.uint8)
+    corners = calib.get("corners_px") if calib else None
+    if not corners or len(corners) < 3:
+        return mask.astype(bool)
+    pts = np.asarray(corners, dtype=np.int32).reshape(-1, 1, 2)
+    cv2.fillPoly(mask, [pts], 1)
+    if margin_px > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (margin_px * 2 + 1, margin_px * 2 + 1)
+        )
+        mask = cv2.dilate(mask, kernel)
+    return mask.astype(bool)
 
 
 def workspace_mask(depth_u16: np.ndarray, depth_scale_m: float, intrinsics: dict) -> np.ndarray:
@@ -163,7 +187,7 @@ def detect_objects(
     if depth_scale_m <= 0:
         return []
     depth_m = depth_u16.astype(np.float32) * float(depth_scale_m)
-    valid = (depth_m > 0.15) & (depth_m < 2.0)
+    valid = (depth_m > DEPTH_NEAR_M) & (depth_m < DEPTH_FAR_M)
     if int(valid.sum()) < 200:
         return []
 
@@ -171,18 +195,15 @@ def detect_objects(
     if not calib or color_bgr is None or "hue_center" not in calib:
         return []
     on_pad = workspace_mask(depth_u16, depth_scale_m, intrinsics)
-    foreground = valid & on_pad & color_mask(color_bgr, calib)
-    # The color sample often covers the table as well as the object. The
-    # table is flat, so the pixels that stand above it are the object, and
-    # those are what X and Y follow.
+    # On the table in the image, or standing above it. A taller object leaves
+    # the clicked rectangle, but its ground position stays inside the pad.
+    colored = valid & color_mask(color_bgr, calib)
+    on_table = table_pixel_mask(depth_u16.shape, calib)
+    foreground = colored & (on_table | on_pad)
     plane = fit_table_plane(depth_m, valid, on_pad, intrinsics)
-    raised = _above_table(depth_m, foreground, intrinsics, plane)
-    if raised is not None:
-        foreground = raised
     mask = (foreground.astype(np.uint8)) * 255
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     found = []
@@ -206,6 +227,8 @@ def detect_objects(
         cam_x = float(np.median(cam_xs))
         cam_y = float(np.median(cam_ys))
         cam_z = float(np.median(cam_zs))
+        if not bool(np.asarray(xz_inside(cam_x, cam_z)).reshape(-1)[0]):
+            continue
         distance = float(np.sqrt(cam_x**2 + cam_y**2 + cam_z**2))
         height = height_of_mask(depth_m, samples, intrinsics, plane)
         found.append(Detection(u, v, cam_x, cam_z, contour, distance, height))

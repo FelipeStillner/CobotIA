@@ -17,7 +17,8 @@ if sys.platform.startswith("linux"):
 import cv2
 import numpy as np
 
-from calibration import load_calibration, xz_inside
+from calibration import load_calibration
+from detect_object import DEPTH_FAR_M, DEPTH_NEAR_M, color_mask, table_pixel_mask
 from realsense_overlay import blend_overlay
 from safety import in_camera_workspace
 
@@ -54,21 +55,17 @@ def draw_calibrated_area(image):
 
 
 def paint_workspace(image, depth_u16, depth_scale_m, intrinsics):
-    """Tint the table pixels that lie inside the calibrated pad."""
-    if intrinsics is None or not depth_scale_m:
+    """Tint the clicked table. The robot above that rectangle stays untinted."""
+    del depth_u16, depth_scale_m, intrinsics
+    calib = load_calibration()
+    inside = table_pixel_mask(image.shape, calib, margin_px=0)
+    if not np.any(inside):
         return image
-    us = np.arange(depth_u16.shape[1], dtype=np.float32)[None, :]
-    z = depth_u16.astype(np.float32) * float(depth_scale_m)
-    x = (us - intrinsics["ppx"]) / intrinsics["fx"] * z
-    inside = (depth_u16 > 0) & xz_inside(x, z)
     out = image.copy()
     tint = np.zeros_like(out)
     tint[:] = (0, 180, 0)
     blended = cv2.addWeighted(out, 0.6, tint, 0.4, 0)
     out[inside] = blended[inside]
-    mask = (inside.astype(np.uint8)) * 255
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(out, contours, -1, (0, 255, 0), 2)
     return out
 
 
@@ -112,6 +109,47 @@ def draw_status(overlay, det, target, note: str, others=()) -> None:
     _text(overlay, lines)
 
 
+def _caption(image, text) -> None:
+    cv2.putText(image, text, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA)
+    cv2.putText(image, text, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
+
+
+def color_range_view(color):
+    """Camera pixels that pass the saved hue, saturation and brightness."""
+    view = np.zeros_like(color)
+    calib = load_calibration()
+    if not calib or "hue_center" not in calib:
+        _caption(view, "color range: no sample")
+        return view
+    selected = color_mask(color, calib)
+    view[selected] = color[selected]
+    _caption(view, "color range")
+    return view
+
+
+def depth_range_view(color, depth, depth_scale_m):
+    """Pixels whose depth is inside the range the detector accepts."""
+    view = np.zeros_like(color)
+    scale = depth_scale_m if depth_scale_m else 0.0
+    if scale > 0 and depth.shape[:2] == color.shape[:2]:
+        depth_m = depth.astype(np.float32) * float(scale)
+        selected = (depth_m > DEPTH_NEAR_M) & (depth_m < DEPTH_FAR_M)
+        view[selected] = 255
+    _caption(view, f"depth {DEPTH_NEAR_M:.2f}-{DEPTH_FAR_M:.0f} m")
+    return view
+
+
+def _with_ranges(top, color, depth, depth_scale_m):
+    """The camera row, then the color-range and depth-range pictures under it."""
+    bottom = np.hstack([
+        color_range_view(color),
+        depth_range_view(color, depth, depth_scale_m),
+    ])
+    if bottom.shape[1] != top.shape[1]:
+        bottom = cv2.resize(bottom, (top.shape[1], bottom.shape[0]), interpolation=cv2.INTER_NEAREST)
+    return np.vstack([top, bottom])
+
+
 def draw_follow_view(color, depth, depth_scale_m, intrinsics, det, target, status, detections):
     """Side-by-side follow image: annotated color on the left, depth on the right."""
     scale = depth_scale_m if depth_scale_m else 0.001
@@ -123,7 +161,7 @@ def draw_follow_view(color, depth, depth_scale_m, intrinsics, det, target, statu
     heat = draw_calibrated_area(heat)
     others = [item for item in detections if item is not det]
     draw_status(overlay, det, target, status, others)
-    return np.hstack([overlay, heat])
+    return _with_ranges(np.hstack([overlay, heat]), color, depth, scale)
 
 
 def draw_calibrate_view(color, depth, depth_scale_m, corners, phase, message):
@@ -155,4 +193,4 @@ def draw_calibrate_view(color, depth, depth_scale_m, corners, phase, message):
     if message:
         lines.append(message)
     _text(view_left, lines, scale=0.55, gap=24)
-    return np.hstack([view_left, heat])
+    return _with_ranges(np.hstack([view_left, heat]), color, depth, scale)
